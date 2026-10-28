@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>پنل مدیریت تونل</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- لاگین -->
+<div id="loginView" class="login-wrap">
+  <form id="loginForm" class="card login-card">
+    <div class="logo">🚇</div>
+    <h1>پنل مدیریت تونل</h1>
+    <p class="muted">برای ادامه وارد شوید</p>
+    <label>نام کاربری<input id="loginUser" required autocomplete="username"></label>
+    <label>رمز عبور<input id="loginPass" type="password" required autocomplete="current-password"></label>
+    <button class="btn primary w100" type="submit">ورود</button>
+    <p id="loginError" class="error"></p>
+    <p class="muted small">ورود پیش‌فرض: admin / admin123</p>
+  </form>
+</div>
+
+<!-- برنامه اصلی -->
+<div id="appView" class="layout hidden">
+  <aside class="sidebar">
+    <div class="brand">🚇 پنل تونل</div>
+    <nav>
+      <button data-tab="dashboard" class="navbtn active">📊 داشبورد</button>
+      <button data-tab="nodes" class="navbtn">🖥️ سرورها</button>
+      <button data-tab="tunnels" class="navbtn">🔀 تونل‌ها</button>
+      <button data-tab="users" class="navbtn admin-only">👥 کاربران</button>
+      <button data-tab="help" class="navbtn">❓ راهنمای نصب</button>
+    </nav>
+    <div class="side-foot">
+      <div id="whoami" class="muted small"></div>
+      <button id="logoutBtn" class="btn danger w100">خروج</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- داشبورد -->
+    <section id="tab-dashboard" class="tab active">
+      <h2>داشبورد</h2>
+      <div class="cards">
+        <div class="card stat"><span class="muted">سرورها (آنلاین/کل)</span><b id="stNodes">-</b></div>
+        <div class="card stat"><span class="muted">تونل‌های فعال</span><b id="stTunnels">-</b></div>
+        <div class="card stat"><span class="muted">ترافیک ورودی ↓</span><b id="stIn">-</b></div>
+        <div class="card stat"><span class="muted">ترافیک خروجی ↑</span><b id="stOut">-</b></div>
+        <div class="card stat"><span class="muted">مجموع کانکشن‌ها</span><b id="stConn">-</b></div>
+      </div>
+      <div class="card">
+        <h3>ترافیک ۲۴ ساعت اخیر (ساعتی)</h3>
+        <canvas id="chart" height="140"></canvas>
+        <p id="chartEmpty" class="muted small">هنوز داده‌ای ثبت نشده — بعد از فعال شدن تونل و عبور ترافیک نمایش داده می‌شود.</p>
+      </div>
+    </section>
+
+    <!-- سرورها -->
+    <section id="tab-nodes" class="tab">
+      <div class="row between"><h2>سرورها</h2><button class="btn primary" onclick="openNodeModal()">➕ افزودن سرور</button></div>
+      <div class="card tablewrap"><table>
+        <thead><tr><th>نام</th><th>وضعیت</th><th>آدرس عمومی</th><th>IP گزارش‌شده</th><th>نسخه ایجنت / سیستم</th><th>آخرین ارتباط</th><th>عملیات</th></tr></thead>
+        <tbody id="nodesBody"></tbody>
+      </table></div>
+    </section>
+
+    <!-- تونل‌ها -->
+    <section id="tab-tunnels" class="tab">
+      <div class="row between"><h2>تونل‌ها</h2><button class="btn primary" onclick="openTunnelModal()">➕ ساخت تونل</button></div>
+      <div class="card tablewrap"><table>
+        <thead><tr><th>نام</th><th>نوع</th><th>مسیر</th><th>وضعیت</th><th>ترافیک ↓/↑</th><th>کانکشن</th><th>محدودیت/انقضا</th><th>عملیات</th></tr></thead>
+        <tbody id="tunnelsBody"></tbody>
+      </table></div>
+    </section>
+
+    <!-- کاربران -->
+    <section id="tab-users" class="tab">
+      <div class="row between"><h2>کاربران</h2><button class="btn primary" onclick="openUserModal()">➕ کاربر جدید</button></div>
+      <div class="card tablewrap"><table>
+        <thead><tr><th>نام کاربری</th><th>نقش</th><th>وضعیت</th><th>عملیات</th></tr></thead>
+        <tbody id="usersBody"></tbody>
+      </table></div>
+    </section>
+
+    <!-- راهنما -->
+    <section id="tab-help" class="tab">
+      <h2>راهنمای نصب و استفاده</h2>
+      <div class="card">
+        <h3>۱) افزودن سرور</h3>
+        <p>از تب «سرورها» یک سرور بسازید. پنل یک <b>دستور نصب تک‌خطی</b> به شما می‌دهد؛ همان را روی سرور مقصد اجرا کنید. ایجنت (فقط با پایتون ۳ استاندارد) نصب و به‌صورت سرویس systemd فعال می‌شود و وضعیت سرور «آنلاین» خواهد شد.</p>
+        <h3>۲) ساخت تونل</h3>
+        <ul>
+          <li><b>Forward (مستقیم):</b> روی سرور مبدا روی یک پورت گوش می‌دهد و ترافیک را مستقیم به <code>IP:Port</code> مقصد می‌فرستد. TCP و UDP.</li>
+          <li><b>Reverse (ریورس):</b> وقتی سرور مقصد IP عمومی ندارد یا پشت NAT/فایروال است. ترافیک از پورت ورودی سرور عمومی، از طریق اتصال دائمی ایجنت مقصد، به سرویس لوکال آن می‌رسد (مثل FRP). فقط TCP.</li>
+        </ul>
+        <h3>۳) نکات شبکه</h3>
+        <ul>
+          <li>پورت‌های <code>listen</code> هر تونل و پورت <code>relay</code> (پیش‌فرض 10000) سرور عمومی باید در فایروال باز باشند.</li>
+          <li>برای سرور عمومی، در فرم سرور حتما «آدرس عمومی» (IP یا دامین) را وارد کنید تا ایجنت مقصد بداند به کجا وصل شود.</li>
+        </ul>
+        <h3>مثال سریع</h3>
+        <p>می‌خواهید SSH سرور خانگی (بدون IP عمومی) از اینترنت در دسترس باشد:<br>
+        سرورها: «سرور عمومی» و «سرور خانگی» را اضافه و ایجنت را روی هر دو نصب کنید ← تونل جدید: نوع=Reverse، سرور مبدا=عمومی، پورت ورودی=2222، سرور مقصد=خانگی، مقصد=127.0.0.1:22 ← حالا <code>ssh -p 2222 user@PUBLIC_IP</code></p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- مودال سرور -->
+<div id="nodeModal" class="modal hidden"><div class="card modal-card">
+  <h3 id="nodeModalTitle">افزودن سرور</h3>
+  <form id="nodeForm">
+    <input type="hidden" id="nodeId">
+    <label>نام سرور *<input id="nodeName" required placeholder="مثلاً: سرور آلمان"></label>
+    <label>آدرس عمومی (IP یا دامین)<input id="nodeHost" placeholder="203.0.113.10"></label>
+    <label>توضیح<input id="nodeDesc"></label>
+    <div id="installBox" class="hidden">
+      <label>دستور نصب ایجنت روی این سرور (تک‌خطی):</label>
+      <div class="row"><code id="installCmd" class="cmd"></code><button type="button" class="btn" onclick="copyInstall()">کپی</button></div>
+      <p class="muted small">این دستور را روی سرور اجرا کنید؛ بعد از چند ثانیه وضعیت آنلاین می‌شود. این دستور را مثل رمز نگه دارید (حاوی توکن سرور است).</p>
+    </div>
+    <div class="row end"><button type="button" class="btn" onclick="closeModal('nodeModal')">بستن</button><button class="btn primary" type="submit">ذخیره</button></div>
+  </form>
+</div></div>
+
+<!-- مودال تونل -->
+<div id="tunnelModal" class="modal hidden"><div class="card modal-card">
+  <h3 id="tunnelModalTitle">ساخت تونل</h3>
+  <form id="tunnelForm">
+    <input type="hidden" id="tunnelId">
+    <label>نام تونل *<input id="tName" required placeholder="مثلاً: SSH سرور خانگی"></label>
+    <label>نوع تونل
+      <select id="tType" onchange="onTypeChange()">
+        <option value="forward">Forward — فوروارد مستقیم پورت (TCP/UDP)</option>
+        <option value="reverse">Reverse — سرور مقصد پشت NAT است (فقط TCP)</option>
+      </select></label>
+    <label>پروتکل
+      <select id="tProtocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></label>
+    <label>سرور مبدا (ورودی تونل) *<select id="tSource" required></select></label>
+    <label id="destWrap" class="hidden">سرور مقصد (پشت NAT) *<select id="tDest"></select></label>
+    <div class="row">
+      <label class="grow">پورت ورودی روی سرور مبدا *<input id="tListen" type="number" min="1" max="65535" required placeholder="2222"></label>
+      <label class="grow">پورت مقصد *<input id="tTargetPort" type="number" min="1" max="65535" required placeholder="22"></label>
+    </div>
+    <label>هاست مقصد<input id="tTargetHost" value="127.0.0.1"><span class="muted small" id="targetHint">در Forward: آدرس نهایی مقصد — در Reverse: آدرس سرویس روی سرور مقصد (معمولاً 127.0.0.1)</span></label>
+    <div class="row">
+      <label class="grow">محدودیت ترافیک (GB) — خالی=نامحدود<input id="tLimit" type="number" step="0.1" min="0"></label>
+      <label class="grow">تاریخ انقضا (اختیاری)<input id="tExpire" type="datetime-local"></label>
+    </div>
+    <div class="row end"><button type="button" class="btn" onclick="closeModal('tunnelModal')">انصراف</button><button class="btn primary" type="submit">ذخیره</button></div>
+  </form>
+</div></div>
+
+<!-- مودال کاربر -->
+<div id="userModal" class="modal hidden"><div class="card modal-card">
+  <h3>کاربر جدید</h3>
+  <form id="userForm">
+    <label>نام کاربری *<input id="uName" required></label>
+    <label>رمز عبور *<input id="uPass" type="password" required></label>
+    <label>نقش<select id="uRole"><option value="user">کاربر عادی (فقط تونل‌های خودش)</option><option value="admin">ادمین</option></select></label>
+    <div class="row end"><button type="button" class="btn" onclick="closeModal('userModal')">انصراف</button><button class="btn primary" type="submit">ساخت</button></div>
+  </form>
+</div></div>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
