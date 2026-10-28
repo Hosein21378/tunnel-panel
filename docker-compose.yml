@@ -1,0 +1,32 @@
+services:
+  panel:
+    build: .
+    container_name: tunnel-panel
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # حتما این‌ها را عوض کنید!
+      SECRET_KEY: "${SECRET_KEY:-change-this-to-a-long-random-string}"
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:[SECURITY_DATA]
+    volumes:
+      - panel-data:/data
+
+  # ایجنت روی همان سرور پنل (اختیاری - اگر این سرور خودش هم باید تونل بزند)
+  # توکن را بعد از ساخت نود در پنل اینجا بگذارید و کامنت‌ها را بردارید:
+  # agent:
+  #   image: python:3.12-slim
+  #   container_name: tunnel-agent
+  #   restart: unless-stopped
+  #   network_mode: host
+  #   volumes:
+  #     - ./agent/agent.py:/agent.py:ro
+  #   environment:
+  #     PANEL_URL: "http://127.0.0.1:8080"
+  #     NODE_TOKEN: "TOKEN_FROM_PANEL"
+  #     RELAY_PORT: "10000"
+  #   command: python3 /agent.py
+
+volumes:
+  panel-data:
