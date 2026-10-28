@@ -57,8 +57,23 @@ fi
 
 cd "$INSTALL_DIR"
 python3 -m venv .venv
-.venv/bin/pip install -q --upgrade pip
-.venv/bin/pip install -q -r requirements.txt
+# نصب وابستگی‌ها با تلاش مجدد و میرور جایگزین (برای سرورهایی که DNS/PyPI مشکل دارد)
+install_deps() {
+  local idx
+  for idx in "${PIP_INDEX_URL:-}" "https://pypi.org/simple" "https://mirrors.aliyun.com/pypi/simple" "https://pypi.tuna.tsinghua.edu.cn/simple"; do
+    [ -z "$idx" ] && continue
+    echo "==> Trying package index: $idx"
+    if .venv/bin/pip install --retries 5 --timeout 60 -i "$idx" -r requirements.txt; then
+      return 0
+    fi
+    echo "==> failed with $idx -- trying next ..."
+  done
+  echo "ERROR: pip install failed from all indexes."
+  echo "Check internet/DNS on this server, e.g.:  ping -c1 pypi.org"
+  echo "Fix DNS (example):  echo 'nameserver 8.8.8.8' | sudo tee /etc/resolv.conf"
+  return 1
+}
+install_deps
 
 # ساخت .env با سکرت تصادفی (فقط بار اول)
 if [ ! -f .env ]; then
