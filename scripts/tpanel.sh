@@ -81,17 +81,33 @@ fetch_binary() { # $1=dest  $2=panel_url_or_empty
   if download "$REPO_RAW/bin/tpanel-linux-$arch" "$tmp" && [[ -s "$tmp" ]]; then
     install -m 0755 "$tmp" "$dest"; rm -f "$tmp"; return 0
   fi
+  # جایگزین: باینری ساخته‌شده توسط گیت‌هاب اکشنز در ریلیز
+  if download "https://github.com/Hosein21378/tunnel-panel/releases/latest/download/tpanel-linux-$arch" "$tmp" && [[ -s "$tmp" ]]; then
+    install -m 0755 "$tmp" "$dest"; rm -f "$tmp"; return 0
+  fi
+  # جایگزین: باینری در ریشه ریپو (آپلودشده با گوشی، بدون پوشه)
+  if download "$REPO_RAW/tpanel-linux-$arch" "$tmp" && [[ -s "$tmp" ]]; then
+    install -m 0755 "$tmp" "$dest"; rm -f "$tmp"; return 0
+  fi
   rm -f "$tmp"
   return 1
 }
 
-ensure_binary() { # $1=panel_url_or_empty
-  if [[ -x "$BIN" ]] && "$BIN" version >/dev/null 2>&1; then
+ensure_binary() { # $1=force(1/0)  $2=panel_url_or_empty
+  local force=${1:-0}
+  if [[ $force -eq 0 && -x "$BIN" ]] && "$BIN" version >/dev/null 2>&1; then
     return 0
   fi
-  fetch_binary "$BIN" "${1:-}" || die "Download failed. Check internet/DNS, or set another mirror. Nothing was installed."
-  "$BIN" version >/dev/null 2>&1 || die "Downloaded file is not a valid tpanel binary for this server."
-  ok "Binary installed: $($BIN version)"
+  if fetch_binary "$BIN" "${2:-}"; then
+    "$BIN" version >/dev/null 2>&1 || die "Downloaded file is not a valid tpanel binary for this server."
+    ok "Binary ready: $($BIN version)"
+    return 0
+  fi
+  if [[ -x "$BIN" ]] && "$BIN" version >/dev/null 2>&1; then
+    warn "Update download failed; keeping current binary: $($BIN version)"
+    return 0
+  fi
+  die "Download failed. Check internet/DNS. Nothing was installed."
 }
 
 has_systemd() { command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; }
@@ -107,7 +123,7 @@ gen_password() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c 14; echo; }
 
 install_manager_self() {
   local tmp; tmp=$(mktemp)
-  if download "$REPO_RAW/scripts/tpanel.sh" "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+  if { download "$REPO_RAW/scripts/tpanel.sh" "$tmp" 2>/dev/null || download "$REPO_RAW/manager.sh" "$tmp" 2>/dev/null; } && [[ -s "$tmp" ]]; then
     install -m 0755 "$tmp" "$MANAGER" 2>/dev/null || true
   fi
   rm -f "$tmp"
@@ -145,7 +161,7 @@ panel_install() {
   while [[ $# -gt 0 ]]; do case "$1" in --port) port=$2; shift 2;; *) shift;; esac; done
   need_root "$@"
   echo; echo "  ${B}◆ Installing Tunnel Panel (port $port)${R}"
-  ensure_binary ""
+  ensure_binary 1 ""
   mkdir -p "$DATA_DIR" "$CONF_DIR"
   # رمز ادمین: فقط اگر قبلا ساخته نشده باشد
   if [[ ! -f "$DATA_FILE" && ! -f "$CONF_DIR/panel.env" ]]; then
@@ -234,7 +250,7 @@ agent_install() {
   [[ -n "$panel" && -n "$token" ]] || die "Panel URL and token are required."
   panel=${panel%/}
   echo; echo "  ${B}◆ Connecting this server to $panel${R}"
-  ensure_binary "$panel"
+  ensure_binary 1 "$panel"
   if has_systemd; then
     cat > /etc/systemd/system/$AGENT_UNIT.service <<EOF
 [Unit]
