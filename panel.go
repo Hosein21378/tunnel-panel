@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,7 +25,47 @@ var webCSS []byte
 //go:embed manager.sh
 var managerScript []byte
 
-type panelServer struct{ st *Store }
+type panelServer struct {
+	st       *Store
+	probeMu  sync.Mutex
+	probes   map[int]*probeTask
+	probeSeq int
+}
+
+// probeTask تست اتصال موقت بین دو سرور (قبل از ساخت تونل)
+type probeTask struct {
+	ID      int
+	SrcID   int
+	DstID   int
+	Token string
+	Created time.Time
+	Results []probeResult
+}
+
+type probeResult struct {
+	Transport string `json:"transport"`
+	OK        bool   `json:"ok"`
+	RTTms     int64  `json:"rtt_ms"`
+	Error     string `json:"error"`
+}
+
+func (p *panelServer) activeProbe() *probeTask {
+	p.probeMu.Lock()
+	defer p.probeMu.Unlock()
+	var best *probeTask
+	for _, t := range p.probes {
+		if time.Since(t.Created) < 90*time.Second && (best == nil || t.Created.After(best.Created)) {
+			best = t
+		}
+	}
+	return best
+}
+
+func (p *panelServer) getProbe(id int) *probeTask {
+	p.probeMu.Lock()
+	defer p.probeMu.Unlock()
+	return p.probes[id]
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -943,6 +984,85 @@ func runPanel(host string, port int, dataPath string) error {
 			}
 		}
 	})
+	mux.HandleFunc("/api/linktest", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := p.authUser(w, r)
+		if !ok {
+			return
+		}
+		_ = u
+		if r.Method != http.MethodPost {
+			errJSON(w, 405, "method not allowed")
+			return
+		}
+		var in struct {
+			SourceNodeID int `json:"source_node_id"`
+			DestNodeID   int `json:"dest_node_id"`
+		}
+		if readJSON(r, &in) != nil || in.SourceNodeID == 0 || in.DestNodeID == 0 {
+			errJSON(w, 400, "هر دو سرور را انتخاب کنید")
+			return
+		}
+		if in.SourceNodeID == in.DestNodeID {
+			errJSON(w, 400, "سرور ورودی و خروجی یکی است")
+			return
+		}
+		st.mu.Lock()
+		_, okS := p.findNode(in.SourceNodeID)
+		_, okD := p.findNode(in.DestNodeID)
+		st.mu.Unlock()
+		if !okS || !okD {
+			errJSON(w, 400, "سرور یافت نشد")
+			return
+		}
+		p.probeMu.Lock()
+		if p.probes == nil {
+			p.probes = map[int]*probeTask{}
+		}
+		p.probeSeq++
+		task := &probeTask{ID: p.probeSeq, SrcID: in.SourceNodeID, DstID: in.DestNodeID,
+			Token: randomToken(), Created: time.Now()}
+		p.probes[task.ID] = task
+		// پاکسازی تسک‌های قدیمی
+		for id, t := range p.probes {
+			if time.Since(t.Created) > 10*time.Minute {
+				delete(p.probes, id)
+			}
+		}
+		p.probeMu.Unlock()
+		writeJSON(w, 200, map[string]any{"probe_id": task.ID})
+	})
+	mux.HandleFunc("/api/linktest/", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := p.authUser(w, r); !ok {
+			return
+		}
+		id, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/linktest/"))
+		task := p.getProbe(id)
+		if task == nil {
+			errJSON(w, 404, "تست یافت نشد")
+			return
+		}
+		done := len(task.Results) > 0
+		suggested := ""
+		if done {
+			bestRtt := int64(0)
+			for _, r := range task.Results {
+				if !r.OK {
+					continue
+				}
+				if suggested == "" || r.RTTms < bestRtt {
+					suggested, bestRtt = r.Transport, r.RTTms
+				}
+			}
+			// TCPMux روی مسیر سالم معمولا بهترین است؛ اگر نزدیک بهترین بود همان را پیشنهاد بده
+			for _, r := range task.Results {
+				if r.Transport == "tcpmux" && r.OK && r.RTTms <= bestRtt*2+20 {
+					suggested = "tcpmux"
+				}
+			}
+		}
+		writeJSON(w, 200, map[string]any{"done": done, "results": task.Results,
+			"suggested": suggested, "age_seconds": int(time.Since(task.Created).Seconds())})
+	})
 	mux.HandleFunc("/api/agent/config", func(w http.ResponseWriter, r *http.Request) {
 		id, ok := agentTouch(w, r)
 		if !ok {
@@ -992,7 +1112,23 @@ func runPanel(host string, port int, dataPath string) error {
 			}
 		}
 		selfUpdate := me.AgentVersion != "" && compareVersions(me.AgentVersion, Version) < 0
-		writeJSON(w, 200, map[string]any{"listen": listen, "reverse_connect": rev, "accept_direct": acceptDirect, "relay_port": me.RelayPort, "self_update": selfUpdate})
+		resp := map[string]any{"listen": listen, "reverse_connect": rev, "accept_direct": acceptDirect, "relay_port": me.RelayPort, "self_update": selfUpdate}
+		if task := p.activeProbe(); task != nil {
+			if id == task.SrcID {
+				resp["probe_listen"] = map[string]any{"probe_id": task.ID, "token": task.Token}
+			}
+			if id == task.DstID {
+				if src, ok := p.findNode(task.SrcID); ok {
+					host := src.Host
+					if host == "" {
+						host = src.ReportedIP
+					}
+					resp["probe_dial"] = map[string]any{"probe_id": task.ID, "token": task.Token,
+						"relay_host": host, "relay_port": src.RelayPort}
+				}
+			}
+		}
+		writeJSON(w, 200, resp)
 	})
 	mux.HandleFunc("/api/agent/heartbeat", func(w http.ResponseWriter, r *http.Request) {
 		id, ok := agentTouch(w, r)
@@ -1005,6 +1141,10 @@ func runPanel(host string, port int, dataPath string) error {
 			OSInfo         string  `json:"os_info"`
 			RelayPort      int     `json:"relay_port"`
 			Links          []LinkReport `json:"links"`
+			ProbeResults   []struct {
+				ProbeID int           `json:"probe_id"`
+				Results []probeResult `json:"results"`
+			} `json:"probe_results"`
 			CPUPercent     float64 `json:"cpu_percent"`
 			MemUsedBytes   int64   `json:"mem_used_bytes"`
 			MemTotalBytes  int64   `json:"mem_total_bytes"`
@@ -1030,6 +1170,13 @@ func runPanel(host string, port int, dataPath string) error {
 				}
 				if in.Version != "" {
 					st.d.Nodes[i].AgentVersion = in.Version
+					for _, pr := range in.ProbeResults {
+						if task := p.getProbe(pr.ProbeID); task != nil && task.DstID == id {
+							p.probeMu.Lock()
+							task.Results = pr.Results
+							p.probeMu.Unlock()
+						}
+					}
 					if in.Links != nil {
 						for j := range in.Links {
 							in.Links[j].At = nowStr()

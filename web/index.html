@@ -249,12 +249,17 @@
         <option value="auto">Auto — خودکار (TCP + Mux + WS + WSS)</option>
       </select>
       <small class="muted" id="transportHint"></small></label>
+    <div id="linkTestBox" class="linktest hidden">
+      <button type="button" class="btn ghost" id="linkTestBtn" onclick="runLinkTest()">🔌 تست اتصال بین دو سرور</button>
+      <div id="linkTestResult"></div>
+    </div>
     <div class="route-preview"><span id="rpFrom">سرور مبدا</span><i>→ پورت <b id="rpListen">؟</b> →</i><span id="rpTo">مقصد</span></div>
     <div class="row">
       <label class="grow">پورت ورودی *<input id="tListen" type="number" min="1" max="65535" required placeholder="2222" oninput="syncRoute()"></label>
-      <label class="grow"><span id="targetHostLabel">هاست مقصد</span><input id="tTargetHost" class="ltr" value="127.0.0.1" oninput="syncRoute()"></label>
+      <label class="grow" id="targetHostWrap"><span id="targetHostLabel">هاست مقصد</span><input id="tTargetHost" class="ltr" value="127.0.0.1" oninput="syncRoute()"></label>
       <label class="grow">پورت مقصد *<input id="tTargetPort" type="number" min="1" max="65535" required placeholder="22" oninput="syncRoute()"></label>
     </div>
+    <div id="customHostRow" class="hidden"><a class="mini-link" href="#" onclick="toggleCustomHost(event)">سرویس روی دستگاه دیگری پشت سرور خروجی است؟ (هاست سفارشی)</a></div>
     <div class="row">
       <label class="grow">سقف ترافیک (GB) — خالی = نامحدود<input id="tLimit" type="number" step="0.1" min="0" placeholder="نامحدود"></label>
       <label class="grow">انقضا (اختیاری)<input id="tExpire" type="datetime-local"></label>

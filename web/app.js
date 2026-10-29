@@ -257,6 +257,43 @@ function linkBadge(t){
     default: return `<span class="lbadge warn">🟡 در انتظار اتصال خروجی…</span>`;
   }
 }
+async function runLinkTest(){
+  const srcId = +$('#tSource').value, dstId = +$('#tDest').value;
+  const box = $('#linkTestResult');
+  if(!srcId || !dstId){ box.innerHTML = '<p class="hint">اول سرور ورودی و خروجی را انتخاب کن.</p>'; return; }
+  if(srcId === dstId){ box.innerHTML = '<p class="hint">سرور ورودی و خروجی نمی‌توانند یکی باشند.</p>'; return; }
+  const srcN = nodesCache.find(n=>n.id===srcId), dstN = nodesCache.find(n=>n.id===dstId);
+  if((srcN && !srcN.online) || (dstN && !dstN.online)){ box.innerHTML = '<p class="hint">⚠️ یکی از دو سرور الان آفلاین است؛ ایجنتش را بررسی کن بعد تست بگیر.</p>'; return; }
+  $('#linkTestBtn').disabled = true;
+  box.innerHTML = '<p class="muted">⏳ در حال تست... ایجنت خروجی با هر ۴ روش به سرور ورودی وصل می‌شود (ممکن است تا ۳۰ ثانیه طول بکشد).</p>';
+  try{
+    const { probe_id } = await api('POST','/api/linktest', { source_node_id: srcId, dest_node_id: dstId });
+    const started = Date.now();
+    while(Date.now() - started < 90000){
+      await new Promise(r=>setTimeout(r, 2500));
+      const st = await api('GET','/api/linktest/' + probe_id);
+      if(st.done){
+        const rows = (st.results||[]).map(r=>`<tr${st.suggested===r.transport?' class="suggested"':''}>
+          <td>${TRANS_FA[r.transport]||r.transport}${st.suggested===r.transport?' ⭐':''}</td>
+          <td>${r.ok?'🟢 وصل شد':'🔴 نشد'}</td>
+          <td>${r.ok? Number(r.rtt_ms||0).toLocaleString('fa-IR')+'ms' : '<span class="muted">'+esc(r.error||'')+'</span>'}</td></tr>`).join('');
+        box.innerHTML = `<table class="probe-table"><thead><tr><th>ترنسپورت</th><th>نتیجه</th><th>تأخیر</th></tr></thead><tbody>${rows}</tbody></table>
+          ${st.suggested? `<p class="hint">💡 پیشنهاد: <b>${TRANS_FA[st.suggested]||st.suggested}</b> — بهترین مسیر بین این دو سرور همین است.
+          <button type="button" class="btn ghost" onclick="applyTransport('${st.suggested}')">استفاده از ${TRANS_FA[st.suggested]||st.suggested}</button></p>`
+          : '<p class="hint">⚠️ هیچ روشی وصل نشد؛ احتمالاً پورت رله سرور ورودی (پیش‌فرض ۱۰۰۰۰) از سرور خروجی بسته است یا ایجنت خروجی قدیمی است.</p>'}`;
+        $('#linkTestBtn').disabled = false;
+        return;
+      }
+    }
+    box.innerHTML = '<p class="hint">⏱️ تست کامل نشد؛ مطمئن شو هر دو ایجنت آنلاین و به‌روزند، بعد دوباره تست بگیر.</p>';
+  }catch(e){ box.innerHTML = '<p class="hint">خطا: '+esc(e.message)+'</p>'; }
+  $('#linkTestBtn').disabled = false;
+}
+function applyTransport(tr){
+  $('#tTransport').value = tr;
+  syncRoute();
+  toast('ترنسپورت روی ' + (TRANS_FA[tr]||tr) + ' تنظیم شد ✅');
+}
 let probeTunnelId = null;
 async function openProbe(id){
   probeTunnelId = id;
@@ -320,12 +357,23 @@ const TRANSPORT_HINTS = {
   wss:'همان WebSocket ولی با TLS؛ وقتی امنیت یا عبور از فایروال‌های سخت‌گیر مهم است.',
   auto:'سرور خروجی هم‌زمان با TCP و Mux و WS و WSS وصل می‌شود و هرکدام آماده بود استفاده می‌شود؛ مقاوم‌ترین انتخاب.'
 };
+let customHost = false;
+function toggleCustomHost(ev){
+  if(ev) ev.preventDefault();
+  customHost = !customHost;
+  updateTransportUI();
+  if(customHost) $('#tTargetHost').focus();
+}
 function updateTransportUI(){
   const hasExit = !!$('#tDest').value;
   const active = hasExit || $('#tType').value==='reverse';
   $('#transportWrap').style.display = active ? '' : 'none';
   if(active) $('#transportHint').textContent = TRANSPORT_HINTS[$('#tTransport').value||'tcp'];
   $('#targetHostLabel').textContent = hasExit ? 'هاست سرویس روی سرور خروجی' : 'هاست مقصد';
+  // وقتی سرور خروجی مشخص است، سرویس روی همان سرور است و فیلد هاست لازم نیست
+  $('#targetHostWrap').style.display = (hasExit && !customHost) ? 'none' : '';
+  $('#customHostRow').classList.toggle('hidden', !hasExit);
+  $('#linkTestBox').classList.toggle('hidden', !hasExit);
 }
 function syncRoute(){
   const srcSel = $('#tSource'), dstSel = $('#tDest');
@@ -341,7 +389,7 @@ function openTunnelModal(id){
   $('#tunnelForm').reset(); $('#tunnelId').value=''; $('#tTargetHost').value='127.0.0.1';
   $('#tunnelModalTitle').textContent='ساخت تونل';
   $('#tType').disabled=false; $('#tSource').disabled=false;
-  setTunnelType('forward'); $('#tTransport').value='tcp';
+  setTunnelType('forward'); $('#tTransport').value='tcp'; customHost=false; $('#linkTestResult').innerHTML='';
   if(!nodesCache.length){ toast('اول حداقل یک سرور اضافه کن', true); return; }
   if(id){
     const t = tunnelsCache.find(x=>x.id===id); if(!t) return;
@@ -350,7 +398,9 @@ function openTunnelModal(id){
     setTunnelType(t.type); $('#tType').disabled=true;
     $('#tProtocol').value=t.protocol; $('#tSource').value=t.source_node_id; $('#tSource').disabled=true;
     $('#tDest').value=t.dest_node_id||''; $('#tListen').value=t.listen_port;
-    $('#tTransport').value=t.transport||'tcp'; onTypeChange();
+    $('#tTransport').value=t.transport||'tcp';
+    customHost = !['127.0.0.1','localhost',''].includes(t.target_host||'127.0.0.1');
+    onTypeChange();
     $('#tTargetHost').value=t.target_host; $('#tTargetPort').value=t.target_port;
     $('#tLimit').value = t.traffic_limit_bytes? (t.traffic_limit_bytes/1073741824):'';
     if(t.expires_at) $('#tExpire').value = t.expires_at.slice(0,16);
@@ -364,7 +414,7 @@ $('#tunnelForm').addEventListener('submit', async e=>{
   const id = $('#tunnelId').value;
   const exp = $('#tExpire').value;
   const common = {name:$('#tName').value, protocol:$('#tProtocol').value, listen_port:+$('#tListen').value,
-    target_host:$('#tTargetHost').value||'127.0.0.1', target_port:+$('#tTargetPort').value,
+    target_host: ($('#tDest').value && !customHost) ? '127.0.0.1' : ($('#tTargetHost').value||'127.0.0.1'), target_port:+$('#tTargetPort').value,
     traffic_limit_gb: $('#tLimit').value? parseFloat($('#tLimit').value): null,
     expires_at: exp? new Date(exp).toISOString(): null};
   try{

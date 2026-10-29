@@ -311,3 +311,6 @@ ul.nice{color:#c6d5e4;line-height:2.1;font-size:14px;padding-right:19px}
 .probe-table th,.probe-table td{padding:7px 8px;border-bottom:1px solid rgba(255,255,255,.08);text-align:right}
 .probe-table th{color:#8fa3b8;font-weight:600}
 .hint{background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.2);border-radius:10px;padding:8px 10px;font-size:13px;margin-top:8px}
+.linktest{margin-top:10px;padding:10px;border:1px dashed rgba(56,189,248,.35);border-radius:12px}
+.mini-link{font-size:12px;color:#38bdf8;cursor:pointer}
+.probe-table tr.suggested td{background:rgba(45,212,191,.12);font-weight:700}

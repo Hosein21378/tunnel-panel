@@ -309,12 +309,86 @@ type acceptCfg struct {
 	TargetHost string `json:"target_host"`
 	TargetPort int    `json:"target_port"`
 }
+type probeCfg struct {
+	ProbeID   int    `json:"probe_id"`
+	Token     string `json:"token"`
+	RelayHost string `json:"relay_host"`
+	RelayPort int    `json:"relay_port"`
+}
+
 type agentConfig struct {
 	Listen         []listenCfg `json:"listen"`
 	ReverseConnect []revCfg    `json:"reverse_connect"`
 	AcceptDirect   []acceptCfg `json:"accept_direct"`
 	RelayPort      int         `json:"relay_port"`
 	SelfUpdate     bool        `json:"self_update"`
+	ProbeListen    *probeCfg   `json:"probe_listen"`
+	ProbeDial      *probeCfg   `json:"probe_dial"`
+}
+
+func probeKey(id int) int { return -100000 - id }
+
+// نتایج تست اتصال که باید با هارت‌بیت به پنل برود
+var probeMu sync.Mutex
+var pendingProbes = map[int][]map[string]any{}
+
+func runProbeDial(ctx context.Context, pc *probeCfg) {
+	addr := net.JoinHostPort(pc.RelayHost, strconv.Itoa(pc.RelayPort))
+	results := []map[string]any{}
+	for _, tr := range []string{"tcp", "tcpmux", "ws", "wss"} {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		res := map[string]any{"transport": tr, "ok": false, "rtt_ms": int64(0), "error": ""}
+		start := time.Now()
+		init, _ := json.Marshal(map[string]any{"type": "register", "mode": map[bool]string{true: "mux", false: ""}[tr != "tcp"],
+			"transport": tr, "tunnel_id": probeKey(pc.ProbeID), "token": pc.Token})
+		ft, err := dialLink(addr, tr, init)
+		if err != nil {
+			res["error"] = err.Error()
+			results = append(results, res)
+			continue
+		}
+		dialMs := time.Since(start).Milliseconds()
+		// زنده‌بودن لینک: اگر طرف مقابل سریع بست یعنی رد شده
+		alive := true
+		switch t := ft.(type) {
+		case *rawTransport:
+			_ = t.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			buf := make([]byte, 1)
+			_, rerr := t.reader.Read(buf)
+			if rerr == nil {
+				alive = false
+			} else if ne, ok := rerr.(net.Error); ok && ne.Timeout() {
+				alive = true
+			} else {
+				alive = false
+			}
+			_ = t.conn.SetReadDeadline(time.Time{})
+		case *wsTransport:
+			ch := make(chan error, 1)
+			go func() { _, e := t.Recv(); ch <- e }()
+			select {
+			case <-ch:
+				alive = false
+			case <-time.After(500 * time.Millisecond):
+				alive = true
+			}
+		}
+		res["rtt_ms"] = dialMs
+		res["ok"] = alive
+		if !alive {
+			res["error"] = "اتصال از سمت ورودی بسته شد"
+		}
+		_ = ft.Close()
+		results = append(results, res)
+	}
+	probeMu.Lock()
+	pendingProbes[pc.ProbeID] = results
+	probeMu.Unlock()
+	fmt.Printf("[probe %d] link test done: %v\n", pc.ProbeID, results)
 }
 
 // ---------- Reverse: هاب سمت سرور عمومی ----------
@@ -709,6 +783,9 @@ func runServices(ctx context.Context, cfg agentConfig) {
 		hub.directTokens[a.ID] = a.Token
 		hub.directTargets[a.ID] = a
 	}
+	if cfg.ProbeListen != nil {
+		hub.tokens[probeKey(cfg.ProbeListen.ProbeID)] = cfg.ProbeListen.Token
+	}
 	set := &serviceSet{hub: hub}
 	curSet.Store(set)
 	for _, a := range cfg.AcceptDirect {
@@ -775,6 +852,10 @@ func runServices(ctx context.Context, cfg agentConfig) {
 		default:
 			spawnTCP(5)
 		}
+	}
+	if cfg.ProbeDial != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); runProbeDial(ctx, cfg.ProbeDial) }()
 	}
 	<-ctx.Done()
 	wg.Wait()
@@ -1138,6 +1219,15 @@ func runAgent(panelURL, token string, relayPort, pollSec int) error {
 			hb := map[string]any{"hostname": hostname, "ip": localIP(), "version": Version,
 				"os_info": info["os_info"], "relay_port": relayPort, "stats": stats.drain(),
 				"links": buildLinks(cfg)}
+			probeMu.Lock()
+			if len(pendingProbes) > 0 {
+				prs := []map[string]any{}
+				for pid, res := range pendingProbes {
+					prs = append(prs, map[string]any{"probe_id": pid, "results": res})
+				}
+				hb["probe_results"] = prs
+			}
+			probeMu.Unlock()
 			for k, v := range collectResources() {
 				hb[k] = v
 			}
