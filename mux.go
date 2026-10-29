@@ -25,11 +25,13 @@ import (
 // ---------- فریم مالتی‌پلکس ----------
 // هدر ۹ بایتی: streamID(4) + type(1) + len(4)، بعد payload
 const (
-	frameOpen   = 1
-	frameOpenOK = 2
+	frameOpen    = 1
+	frameOpenOK  = 2
 	frameOpenErr = 3
-	frameData   = 4
-	frameClose  = 5
+	frameData    = 4
+	frameClose   = 5
+	framePing    = 6
+	framePong    = 7
 )
 
 type muxFrame struct {
@@ -315,6 +317,7 @@ type muxSession struct {
 	wmu       sync.Mutex
 	closed    atomic.Bool
 	onClose   func(*muxSession)
+	rttMs     atomic.Int64
 }
 
 func newMuxSession(tr frameTransport, transport string, tunnelID int, isExit bool,
@@ -346,6 +349,24 @@ func (s *muxSession) Close() {
 	if s.onClose != nil {
 		s.onClose(s)
 	}
+}
+
+// StartPinger: مالک سشن (سازنده) هر ۸ ثانیه پینگ می‌فرستد تا RTT لینک معلوم باشد
+func (s *muxSession) StartPinger() {
+	go func() {
+		tk := time.NewTicker(8 * time.Second)
+		defer tk.Stop()
+		for range tk.C {
+			if s.closed.Load() {
+				return
+			}
+			var b [8]byte
+			binary.BigEndian.PutUint64(b[:], uint64(time.Now().UnixNano()))
+			if err := s.send(muxFrame{ID: 0, Type: framePing, Payload: b[:]}); err != nil {
+				return
+			}
+		}
+	}()
 }
 
 // اجرای حلقه خواندن فریم‌ها (در گوروتین جدا صدا زده شود)
@@ -396,6 +417,16 @@ func (s *muxSession) Run() {
 			}
 		case frameClose:
 			s.closeStream(f.ID)
+		case framePing:
+			_ = s.send(muxFrame{ID: 0, Type: framePong, Payload: f.Payload})
+		case framePong:
+			if len(f.Payload) == 8 {
+				sent := int64(binary.BigEndian.Uint64(f.Payload))
+				rtt := (time.Now().UnixNano() - sent) / 1e6
+				if rtt >= 0 && rtt < 60000 {
+					s.rttMs.Store(rtt)
+				}
+			}
 		}
 	}
 }

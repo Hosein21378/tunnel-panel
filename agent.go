@@ -50,6 +50,121 @@ func (a *agentStats) drain() []map[string]any {
 }
 
 var stats = newAgentStats()
+
+// ---------- وضعیت زنده لینک‌ها (گزارش به پنل برای «محک لینک») ----------
+type exitTransState struct {
+	lastOK    time.Time
+	rttMs     int64
+	sess      *muxSession
+	listening bool
+}
+
+var exitMu sync.Mutex
+var exitTrans = map[int]map[string]*exitTransState{}
+var listenersUp sync.Map // tunnelID -> bool
+var curSet atomic.Pointer[serviceSet]
+
+func markExitTrans(tid int, tr string, sess *muxSession, rttMs int64) {
+	exitMu.Lock()
+	defer exitMu.Unlock()
+	if exitTrans[tid] == nil {
+		exitTrans[tid] = map[string]*exitTransState{}
+	}
+	st := exitTrans[tid][tr]
+	if st == nil {
+		st = &exitTransState{}
+		exitTrans[tid][tr] = st
+	}
+	st.lastOK = time.Now()
+	if sess != nil {
+		st.sess = sess
+	}
+	if rttMs > 0 {
+		st.rttMs = rttMs
+	}
+}
+
+func (h *relayHub) poolLen(id int) int { return len(h.pool(id)) }
+
+func (h *relayHub) sessionsFor(id int) []*muxSession {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := []*muxSession{}
+	for _, s := range h.muxSessions[id] {
+		if !s.closed.Load() {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// ساخت گزارش لینک همه تونل‌های این ایجنت برای هارت‌بیت
+func buildLinks(cfg agentConfig) []map[string]any {
+	out := []map[string]any{}
+	set := curSet.Load()
+	for _, t := range cfg.Listen {
+		rep := map[string]any{"tunnel_id": t.ID, "side": "entry", "transports": []map[string]any{}}
+		if v, ok := listenersUp.Load(t.ID); ok && v.(bool) {
+			rep["listener"] = true
+		}
+		trs := []map[string]any{}
+		tr := normTransport(t.Transport)
+		if t.Type == "reverse" {
+			if tr == "tcp" || tr == "auto" {
+				pooled := 0
+				if set != nil {
+					pooled = set.hub.poolLen(t.ID)
+				}
+				trs = append(trs, map[string]any{"name": "tcp", "up": pooled > 0, "pooled": pooled})
+			}
+			if set != nil && tr != "tcp" {
+				for _, sess := range set.hub.sessionsFor(t.ID) {
+					trs = append(trs, map[string]any{"name": sess.transport, "up": true,
+						"streams": sess.StreamsCount(), "rtt_ms": sess.rttMs.Load()})
+				}
+			}
+		} else {
+			if t.DestRelayHost == "" {
+				trs = append(trs, map[string]any{"name": "direct", "up": true})
+			} else if tr == "tcp" {
+				trs = append(trs, map[string]any{"name": "tcp", "up": false, "ondemand": true})
+			} else if set != nil {
+				set.mu.Lock()
+				sess := set.outMux[t.ID]
+				set.mu.Unlock()
+				if sess != nil && !sess.closed.Load() {
+					trs = append(trs, map[string]any{"name": sess.transport, "up": true,
+						"streams": sess.StreamsCount(), "rtt_ms": sess.rttMs.Load()})
+				} else {
+					trs = append(trs, map[string]any{"name": tr, "up": false, "ondemand": true})
+				}
+			}
+		}
+		rep["transports"] = trs
+		out = append(out, rep)
+	}
+	for _, rc := range cfg.ReverseConnect {
+		rep := map[string]any{"tunnel_id": rc.ID, "side": "exit", "transports": []map[string]any{}}
+		trs := []map[string]any{}
+		exitMu.Lock()
+		for name, st := range exitTrans[rc.ID] {
+			up := st.listening || (st.sess != nil && !st.sess.closed.Load()) || time.Since(st.lastOK) < 30*time.Second
+			rtt := st.rttMs
+			if st.sess != nil {
+				rtt = st.sess.rttMs.Load()
+			}
+			trs = append(trs, map[string]any{"name": name, "up": up, "rtt_ms": rtt})
+		}
+		exitMu.Unlock()
+		rep["transports"] = trs
+		out = append(out, rep)
+	}
+	for _, a := range cfg.AcceptDirect {
+		out = append(out, map[string]any{"tunnel_id": a.ID, "side": "exit",
+			"transports": []map[string]any{{"name": normTransport(a.Transport), "up": true, "listening": true}}})
+	}
+	return out
+}
 var lastSelfUpdateTry time.Time
 
 // ---------- منابع سیستم (CPU/RAM/Disk) از /proc ----------
@@ -510,6 +625,7 @@ func (set *serviceSet) getOutMuxSession(t listenCfg) *muxSession {
 		set.mu.Unlock()
 	}
 	go sess.Run()
+	sess.StartPinger()
 	return sess
 }
 
@@ -594,6 +710,20 @@ func runServices(ctx context.Context, cfg agentConfig) {
 		hub.directTargets[a.ID] = a
 	}
 	set := &serviceSet{hub: hub}
+	curSet.Store(set)
+	for _, a := range cfg.AcceptDirect {
+		exitMu.Lock()
+		if exitTrans[a.ID] == nil {
+			exitTrans[a.ID] = map[string]*exitTransState{}
+		}
+		tr := normTransport(a.Transport)
+		if exitTrans[a.ID][tr] == nil {
+			exitTrans[a.ID][tr] = &exitTransState{}
+		}
+		exitTrans[a.ID][tr].listening = true
+		exitTrans[a.ID][tr].lastOK = time.Now()
+		exitMu.Unlock()
+	}
 	// رله همیشه روی relayPort این نود بالا می‌آید (اگر سرور عمومی باشیم استفاده می‌شود)
 	relayPort := cfg.RelayPort
 	if relayPort == 0 {
@@ -657,6 +787,7 @@ func serveForwardTCP(ctx context.Context, set *serviceSet, t listenCfg) {
 		return
 	}
 	go func() { <-ctx.Done(); _ = ln.Close() }()
+	listenersUp.Store(t.ID, true)
 	fmt.Printf("[+] forward tunnel %d listening :%d -> %s:%d\n", t.ID, t.ListenPort, t.TargetHost, t.TargetPort)
 	st := stats.get(t.ID)
 	for {
@@ -713,6 +844,7 @@ func serveReverseListener(ctx context.Context, hub *relayHub, t listenCfg) {
 		return
 	}
 	go func() { <-ctx.Done(); _ = ln.Close() }()
+	listenersUp.Store(t.ID, true)
 	fmt.Printf("[+] reverse tunnel %d listening :%d -> via agent -> %s:%d\n", t.ID, t.ListenPort, t.TargetHost, t.TargetPort)
 	st := stats.get(t.ID)
 	for {
@@ -760,6 +892,7 @@ func reverseWorker(ctx context.Context, rc revCfg) {
 			return
 		default:
 		}
+		dialStart := time.Now()
 		conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 		if err != nil {
 			sleepCtx(ctx, 5*time.Second)
@@ -771,6 +904,7 @@ func reverseWorker(ctx context.Context, rc revCfg) {
 			if _, err := conn.Write(append(reg, '\n')); err != nil {
 				return
 			}
+			markExitTrans(rc.ID, "tcp", nil, time.Since(dialStart).Milliseconds())
 			reader := bufio.NewReader(conn)
 			line, err := reader.ReadString('\n')
 			if err != nil {
@@ -816,6 +950,8 @@ func reverseMuxWorker(ctx context.Context, rc revCfg, transport string) {
 			continue
 		}
 		sess := newMuxSession(ft, transport, rc.ID, true, dialLocal)
+		markExitTrans(rc.ID, transport, sess, 0)
+		sess.StartPinger()
 		done := make(chan struct{})
 		go func() { sess.Run(); close(done) }()
 		select {
@@ -1000,7 +1136,8 @@ func runAgent(panelURL, token string, relayPort, pollSec int) error {
 				}
 			}
 			hb := map[string]any{"hostname": hostname, "ip": localIP(), "version": Version,
-				"os_info": info["os_info"], "relay_port": relayPort, "stats": stats.drain()}
+				"os_info": info["os_info"], "relay_port": relayPort, "stats": stats.drain(),
+				"links": buildLinks(cfg)}
 			for k, v := range collectResources() {
 				hb[k] = v
 			}

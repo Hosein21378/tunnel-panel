@@ -103,6 +103,142 @@ func normTransport(tr string) string {
 	return "tcp"
 }
 
+// linkFor وضعیت زنده لینک بین سرور ورودی و خروجی را از گزارش ایجنت‌ها می‌سازد
+func (p *panelServer) linkFor(t Tunnel) map[string]any {
+	findNode := func(id int) *Node {
+		for i, n := range p.st.d.Nodes {
+			if n.ID == id {
+				return &p.st.d.Nodes[i]
+			}
+		}
+		return nil
+	}
+	findRep := func(n *Node, side string) *LinkReport {
+		if n == nil {
+			return nil
+		}
+		for i, r := range n.Links {
+			if r.TunnelID == t.ID && r.Side == side {
+				return &n.Links[i]
+			}
+		}
+		return nil
+	}
+	src, dst := findNode(t.SourceNodeID), findNode(t.DestNodeID)
+	online := func(n *Node) bool {
+		if n == nil {
+			return false
+		}
+		ts, ok := parseTime(n.LastSeen)
+		return ok && time.Since(ts) < 35*time.Second
+	}
+	entryRep, exitRep := findRep(src, "entry"), findRep(dst, "exit")
+	out := map[string]any{"status": "waiting", "active_transports": []string{}, "rtt_ms": 0,
+		"entry_online": online(src), "exit_online": online(dst),
+		"entry_version": "", "exit_version": ""}
+	if src != nil {
+		out["entry_version"] = src.AgentVersion
+	}
+	if dst != nil {
+		out["exit_version"] = dst.AgentVersion
+	}
+	if entryRep != nil {
+		out["entry"] = entryRep
+		out["entry_report_at"] = entryRep.At
+	}
+	if exitRep != nil {
+		out["exit"] = exitRep
+		out["exit_report_at"] = exitRep.At
+	}
+	active := []string{}
+	rtt := int64(0)
+	collect := func(r *LinkReport) {
+		if r == nil {
+			return
+		}
+		for _, tr := range r.Transports {
+			if tr.Up && tr.Name != "direct" {
+				found := false
+				for _, a := range active {
+					if a == tr.Name {
+						found = true
+					}
+				}
+				if !found {
+					active = append(active, tr.Name)
+				}
+			}
+			if tr.RTTms > 0 && (rtt == 0 || tr.RTTms < rtt) {
+				rtt = tr.RTTms
+			}
+		}
+	}
+	switch {
+	case !online(src):
+		out["status"] = "entry_offline"
+	case t.DestNodeID > 0 && !online(dst):
+		out["status"] = "exit_offline"
+	case t.DestNodeID == 0:
+		out["status"] = "ready"
+		collect(entryRep)
+	case t.Type == "reverse":
+		collect(exitRep)
+		collect(entryRep)
+		if len(active) > 0 {
+			out["status"] = "connected"
+		}
+	default: // forward با سرور خروجی
+		collect(entryRep)
+		listening := false
+		if exitRep != nil {
+			for _, tr := range exitRep.Transports {
+				if tr.Listening {
+					listening = true
+				}
+			}
+		}
+		if len(active) > 0 {
+			out["status"] = "connected"
+		} else if listening || online(dst) {
+			out["status"] = "ready"
+		}
+	}
+	out["active_transports"] = active
+	out["rtt_ms"] = rtt
+	out["configured_transport"] = normTransport(t.Transport)
+	return out
+}
+
+// probeHints راهنمای عیب‌یابی فارسی بر اساس وضعیت لینک
+func probeHints(t Tunnel, link map[string]any) []string {
+	hints := []string{}
+	status, _ := link["status"].(string)
+	ev, _ := link["entry_version"].(string)
+	xv, _ := link["exit_version"].(string)
+	switch status {
+	case "connected":
+		hints = append(hints, "لینک بین دو سرور برقرار است و ترافیک رد می‌شود.")
+	case "ready":
+		hints = append(hints, "دو سرور آماده‌اند؛ در حالت Direct لینک با اولین اتصال کاربر ساخته می‌شود — یک بار به پورت ورودی وصل شوید و دوباره محک بزنید.")
+	case "entry_offline":
+		hints = append(hints, "ایجنت سرور ورودی آفلاین است؛ سرویس tpanel-agent روی سرور ورودی را بررسی کنید.")
+	case "exit_offline":
+		hints = append(hints, "ایجنت سرور خروجی آفلاین است؛ تا وقتی خروجی وصل نشود تونل کار نمی‌کند.")
+	case "waiting":
+		hints = append(hints, "سرور خروجی هنوز لینکی به ورودی نساخته است؛ چند ثانیه صبر کنید. اگر ماند، ایجنت خروجی را ری‌استارت کنید (systemctl restart tpanel-agent) و مطمئن شوید پورت رله سرور ورودی از خروجی قابل دسترس است.")
+	}
+	if ev != "" && compareVersions(ev, Version) < 0 {
+		hints = append(hints, "ایجنت ورودی نسخه "+ev+" است و از پنل ("+Version+") قدیمی‌تر است؛ از تب «آپدیت سیستم» پنل را آپدیت کنید تا ایجنت‌ها خودکار به‌روز شوند، وگرنه ایجنت را دستی آپدیت کنید.")
+	}
+	if t.DestNodeID > 0 && xv != "" && compareVersions(xv, Version) < 0 {
+		hints = append(hints, "ایجنت خروجی نسخه "+xv+" است و از پنل ("+Version+") قدیمی‌تر است؛ ترنسپورت‌های جدید (TCPMux/WS/WSS/Auto) و حالت Direct با خروجی نیازمند ایجنت تازه‌اند.")
+	}
+	if ev == "" && status != "entry_offline" {
+		hints = append(hints, "از سرور ورودی هنوز گزارشی نرسیده است.")
+	}
+	return hints
+}
+
 func (p *panelServer) tunnelOut(t Tunnel) map[string]any {
 	srcName, dstName := "?", ""
 	for _, n := range p.st.d.Nodes {
@@ -128,7 +264,7 @@ func (p *panelServer) tunnelOut(t Tunnel) map[string]any {
 		"listen_port": t.ListenPort, "target_host": t.TargetHost, "target_port": t.TargetPort, "transport": normTransport(t.Transport),
 		"enabled": t.Enabled, "active": tunnelActive(t), "expired": expired, "over_limit": over,
 		"bytes_in": t.BytesIn, "bytes_out": t.BytesOut, "connections": t.Connections,
-		"traffic_limit_bytes": limit, "expires_at": nilOrStr(t.ExpiresAt),
+		"traffic_limit_bytes": limit, "expires_at": nilOrStr(t.ExpiresAt), "link": p.linkFor(t),
 		"owner_id": t.OwnerID, "created_at": t.CreatedAt}
 }
 
@@ -575,6 +711,11 @@ func runPanel(host string, port int, dataPath string) error {
 			st.d.Snapshots = kept
 			_ = st.saveLocked()
 			writeJSON(w, 200, map[string]bool{"ok": true})
+		case r.Method == http.MethodPost && action == "probe":
+			link := p.linkFor(*t)
+			writeJSON(w, 200, map[string]any{"ok": true, "link": link,
+				"transport": normTransport(t.Transport), "type": t.Type,
+				"hints": probeHints(*t, link)})
 		case r.Method == http.MethodPost && action == "toggle":
 			if !t.Enabled {
 				if msg := validateTunnelInput(st, t.Type, t.Protocol, t.SourceNodeID, t.DestNodeID, t.ListenPort, t.TargetPort, t.ID); msg != "" {
@@ -863,6 +1004,7 @@ func runPanel(host string, port int, dataPath string) error {
 			Version        string  `json:"version"`
 			OSInfo         string  `json:"os_info"`
 			RelayPort      int     `json:"relay_port"`
+			Links          []LinkReport `json:"links"`
 			CPUPercent     float64 `json:"cpu_percent"`
 			MemUsedBytes   int64   `json:"mem_used_bytes"`
 			MemTotalBytes  int64   `json:"mem_total_bytes"`
@@ -888,6 +1030,12 @@ func runPanel(host string, port int, dataPath string) error {
 				}
 				if in.Version != "" {
 					st.d.Nodes[i].AgentVersion = in.Version
+					if in.Links != nil {
+						for j := range in.Links {
+							in.Links[j].At = nowStr()
+						}
+						st.d.Nodes[i].Links = in.Links
+					}
 				}
 				if in.OSInfo != "" {
 					st.d.Nodes[i].OSInfo = in.OSInfo

@@ -48,6 +48,28 @@ type Node struct {
 	Load1          float64 `json:"load1"`
 	UptimeSeconds  int64   `json:"uptime_seconds"`
 	NumCPU         int     `json:"num_cpu"`
+	// گزارش زنده لینک تونل‌ها (از هارت‌بیت ایجنت)
+	Links []LinkReport `json:"links"`
+}
+
+// LinkReport گزارش یک ایجنت از وضعیت لینک یک تونل (سمت ورودی یا خروجی)
+type LinkReport struct {
+	TunnelID   int           `json:"tunnel_id"`
+	Side       string        `json:"side"` // entry | exit
+	Listener   bool          `json:"listener"`
+	Transports []TransReport `json:"transports"`
+	At         string        `json:"at"`
+}
+
+// TransReport وضعیت یک ترنسپورت در لینک بین دو سرور
+type TransReport struct {
+	Name     string `json:"name"`
+	Up       bool   `json:"up"`
+	RTTms    int64  `json:"rtt_ms"`
+	Streams  int    `json:"streams"`
+	Pooled   int    `json:"pooled"`
+	Listening bool  `json:"listening"`
+	OnDemand bool   `json:"ondemand"`
 }
 
 type Tunnel struct {

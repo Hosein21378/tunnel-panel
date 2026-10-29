@@ -226,6 +226,7 @@ function renderTunnels(){
       <div><h4>${esc(t.name)}</h4><small>${t.protocol.toUpperCase()}${t.dest_node_id?' · لینک '+({tcp:'TCP',tcpmux:'TCPMux',ws:'WebSocket',wss:'WSS',auto:'Auto'}[t.transport||'tcp']):''} · ساخته‌شده ${fmtDate(t.created_at)}</small></div>
       <span class="status-pill ${status[0]}">${status[1]}</span></div>
     <div class="route"><span class="node-chip">${nodeName(t.source_node_id)}</span><span class="port">:${t.listen_port}</span><span class="arrow">──▶</span>${t.dest_node_id?`<span class="node-chip">${nodeName(t.dest_node_id)}</span><span class="arrow">──▶</span>`:''}<span class="target">${esc(t.target_host)}:${t.target_port}</span></div>
+    <div class="linkline">${linkBadge(t)}</div>
     <div class="traf">
       <div><span>ورودی ↓</span><b>${fmtBytes(t.bytes_in)}</b></div>
       <div><span>خروجی ↑</span><b>${fmtBytes(t.bytes_out)}</b></div>
@@ -235,12 +236,61 @@ function renderTunnels(){
     <div class="card-actions">
       <span class="switch-wrap"><label class="switch"><input type="checkbox" ${t.enabled?'checked':''} onchange="toggleTunnel(${t.id})"><i></i></label>${t.enabled?'روشن':'خاموش'}</span>
       <span class="grow"></span>
+      <button class="icon-btn" title="محک لینک" onclick="openProbe(${t.id})">📡</button>
       <button class="icon-btn" title="ویرایش" onclick="openTunnelModal(${t.id})">✏️</button>
       <button class="icon-btn" title="صفر کردن آمار" onclick="resetTraffic(${t.id})">♻️</button>
       <button class="icon-btn danger" title="حذف" onclick="delTunnel(${t.id})">🗑️</button>
     </div></div>`;
   }).join('') ||
   `<div class="empty-state"><div class="big">🔀</div><b>${q?'تونلی با این اسم پیدا نشد':'هنوز تونلی نساختی'}</b>با دکمه «ساخت تونل» دو سرورت را به هم وصل کن — کمتر از یک دقیقه طول می‌کشد.</div>`;
+}
+const TRANS_FA = {tcp:'TCP', tcpmux:'TCPMux', ws:'WebSocket', wss:'WSS', auto:'Auto', direct:'مستقیم'};
+function linkBadge(t){
+  const L = t.link || {};
+  const act = (L.active_transports||[]).map(x=>TRANS_FA[x]||x).join(' + ');
+  const rtt = L.rtt_ms ? ' · ' + Number(L.rtt_ms).toLocaleString('fa-IR') + 'ms' : '';
+  switch(L.status){
+    case 'connected': return `<span class="lbadge on">🟢 لینک برقرار${act?' · '+act:''}${rtt}</span>`;
+    case 'ready': return `<span class="lbadge mid">🔵 آماده${t.dest_node_id?' · با اولین اتصال برقرار می‌شود':' · مستقیم'}</span>`;
+    case 'entry_offline': return `<span class="lbadge off">🔴 ایجنت ورودی آفلاین</span>`;
+    case 'exit_offline': return `<span class="lbadge off">🔴 ایجنت خروجی آفلاین</span>`;
+    default: return `<span class="lbadge warn">🟡 در انتظار اتصال خروجی…</span>`;
+  }
+}
+let probeTunnelId = null;
+async function openProbe(id){
+  probeTunnelId = id;
+  const t = tunnelsCache.find(x=>x.id===id);
+  $('#probeTitle').textContent = 'محک لینک: ' + (t? t.name : '');
+  $('#probeBody').innerHTML = '<p class="muted">در حال بررسی لینک بین دو سرور...</p>';
+  $('#probeModal').classList.remove('hidden');
+  $('#probeRetry').onclick = ()=> openProbe(probeTunnelId);
+  try{
+    const r = await api('POST','/api/tunnels/'+id+'/probe', {});
+    const L = r.link || {};
+    const rows = [];
+    const sideRows = (rep, label)=>{
+      if(!rep) return `<tr><td>${label}</td><td colspan="3" class="muted">گزارشی نرسیده</td></tr>`;
+      const trs = (rep.transports||[]);
+      if(!trs.length) return `<tr><td>${label}</td><td colspan="3" class="muted">ترنسپورتی گزارش نشده</td></tr>`;
+      return trs.map(tr=>`<tr><td>${label}</td><td>${TRANS_FA[tr.name]||tr.name}</td>
+        <td>${tr.up? '🟢 وصل' : (tr.listening? '🔵 گوش‌به‌زنگ' : (tr.ondemand? '⚪ عنداللزوم' : '🔴 قطع'))}</td>
+        <td>${tr.rtt_ms? Number(tr.rtt_ms).toLocaleString('fa-IR')+'ms' : (tr.pooled? tr.pooled.toLocaleString('fa-IR')+' کانکشن آماده' : (tr.streams? tr.streams.toLocaleString('fa-IR')+' استریم' : '—'))}</td></tr>`).join('');
+    };
+    rows.push(sideRows(L.entry, 'ورودی · ' + (t? esc(t.source_node_name||'') : '')));
+    if(t && t.dest_node_id) rows.push(sideRows(L.exit, 'خروجی · ' + esc(t.dest_node_name||'')));
+    $('#probeBody').innerHTML = `
+      <div class="linkline" style="margin-bottom:10px">${linkBadge({...t, link:L})}</div>
+      <table class="probe-table"><thead><tr><th>سمت</th><th>ترنسپورت</th><th>وضعیت</th><th>تأخیر/جزئیات</th></tr></thead>
+      <tbody>${rows.join('')}</tbody></table>
+      <div class="kv-rows" style="margin-top:10px">
+        <div><span>ترنسپورت تنظیم‌شده</span><b>${TRANS_FA[r.transport]||r.transport} · ${r.type==='reverse'?'Reverse':'Direct'}</b></div>
+        <div><span>نسخه ایجنت ورودی / خروجی</span><b class="ltr">${esc(L.entry_version||'—')}${t&&t.dest_node_id?' / '+esc(L.exit_version||'—'):''}</b></div>
+        ${L.entry_report_at?`<div><span>آخرین گزارش ورودی</span><b>${relTime(L.entry_report_at)}</b></div>`:''}
+        ${L.exit_report_at?`<div><span>آخرین گزارش خروجی</span><b>${relTime(L.exit_report_at)}</b></div>`:''}
+      </div>
+      ${(r.hints||[]).map(h=>`<p class="hint">💡 ${esc(h)}</p>`).join('')}`;
+  }catch(e){ $('#probeBody').innerHTML = '<p class="hint">خطا: '+esc(e.message)+'</p>'; }
 }
 function setTunnelType(type){
   $('#tType').value = type;
