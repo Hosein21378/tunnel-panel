@@ -137,7 +137,7 @@ async function loadNodes(render=true){
   // انتخاب فعلی کاربر در فرم تونل حفظ شود (باگ برگشتن به اولین سرور)
   const srcEl = $('#tSource'), dstEl = $('#tDest');
   const prevSrc = srcEl.value, prevDst = dstEl.value;
-  srcEl.innerHTML = opts; dstEl.innerHTML = opts;
+  srcEl.innerHTML = opts; dstEl.innerHTML = '<option value="">— بدون سرور خروجی (مستقیم به IP) —</option>' + opts;
   if(prevSrc && [...srcEl.options].some(o=>o.value===prevSrc)) srcEl.value = prevSrc;
   if(prevDst && [...dstEl.options].some(o=>o.value===prevDst)) dstEl.value = prevDst;
   if(render) renderNodes();
@@ -223,9 +223,9 @@ function renderTunnels(){
     const status = !t.enabled ? ['off','غیرفعال'] : t.expired ? ['warn','منقضی شده'] : t.over_limit ? ['warn','ترافیک تمام شد'] : ['on','در حال کار'];
     return `<div class="tunnel-card" style="animation-delay:${Math.min(i*0.05,0.3)}s">
     <div class="tc-head"><span class="type-badge ${t.type}">${t.type==='reverse'?'🔁 REVERSE':'➡️ FORWARD'}</span>
-      <div><h4>${esc(t.name)}</h4><small>${t.protocol.toUpperCase()} · ساخته‌شده ${fmtDate(t.created_at)}</small></div>
+      <div><h4>${esc(t.name)}</h4><small>${t.protocol.toUpperCase()}${t.dest_node_id?' · لینک '+({tcp:'TCP',tcpmux:'TCPMux',ws:'WebSocket',wss:'WSS',auto:'Auto'}[t.transport||'tcp']):''} · ساخته‌شده ${fmtDate(t.created_at)}</small></div>
       <span class="status-pill ${status[0]}">${status[1]}</span></div>
-    <div class="route"><span class="node-chip">${nodeName(t.source_node_id)}</span><span class="port">:${t.listen_port}</span><span class="arrow">──▶</span>${t.type==='reverse'?`<span class="node-chip">${nodeName(t.dest_node_id)}</span><span class="arrow">──▶</span>`:''}<span class="target">${esc(t.target_host)}:${t.target_port}</span></div>
+    <div class="route"><span class="node-chip">${nodeName(t.source_node_id)}</span><span class="port">:${t.listen_port}</span><span class="arrow">──▶</span>${t.dest_node_id?`<span class="node-chip">${nodeName(t.dest_node_id)}</span><span class="arrow">──▶</span>`:''}<span class="target">${esc(t.target_host)}:${t.target_port}</span></div>
     <div class="traf">
       <div><span>ورودی ↓</span><b>${fmtBytes(t.bytes_in)}</b></div>
       <div><span>خروجی ↑</span><b>${fmtBytes(t.bytes_out)}</b></div>
@@ -249,9 +249,33 @@ function setTunnelType(type){
 }
 function onTypeChange(){
   const rev = $('#tType').value==='reverse';
-  $('#destWrap').classList.toggle('hidden', !rev);
   $('#tProtocol').disabled = rev;
   if(rev) $('#tProtocol').value='tcp';
+  const dst = $('#tDest'), src = $('#tSource');
+  $('#destLabel').textContent = rev ? 'سرور خروجی (Exit) * — به سرویس واقعی می‌رسد' : 'سرور خروجی (Exit) — کجا ترافیک تحویل شود؟';
+  $('#destHint').textContent = rev
+    ? 'در حالت Reverse سرور خروجی خودش به ورودی وصل می‌شود؛ هیچ پورتی روی خروجی باز نمی‌شود و پشت NAT هم کار می‌کند.'
+    : 'اگر سرور خروجی انتخاب شود، ترافیک از ورودی به ایجنت خروجی می‌رسد و آنجا به سرویس مقصد وصل می‌شود. خالی = اتصال مستقیم به IP مقصد.';
+  dst.required = rev;
+  if(rev && (!dst.value || dst.value===src.value)){
+    const other = nodesCache.find(n=>String(n.id)!==String(src.value));
+    if(other) dst.value = other.id;
+  }
+  updateTransportUI();
+}
+const TRANSPORT_HINTS = {
+  tcp:'برای هر کاربر یک کانکشن جدا بین دو سرور ساخته می‌شود؛ ساده‌ترین و سازگارترین انتخاب.',
+  tcpmux:'چند کانکشن آماده بین دو سرور نگه داشته می‌شود و ترافیک همه کاربران روی آن‌ها مالتی‌پلکس می‌شود؛ سربار کمتر و سرعت بیشتر.',
+  ws:'لینک داخل WebSocket رد می‌شود؛ وقتی بین دو سرور پروکسی یا CDN هست یا ترافیک باید شبیه وب دیده شود.',
+  wss:'همان WebSocket ولی با TLS؛ وقتی امنیت یا عبور از فایروال‌های سخت‌گیر مهم است.',
+  auto:'سرور خروجی هم‌زمان با TCP و Mux و WS و WSS وصل می‌شود و هرکدام آماده بود استفاده می‌شود؛ مقاوم‌ترین انتخاب.'
+};
+function updateTransportUI(){
+  const hasExit = !!$('#tDest').value;
+  const active = hasExit || $('#tType').value==='reverse';
+  $('#transportWrap').style.display = active ? '' : 'none';
+  if(active) $('#transportHint').textContent = TRANSPORT_HINTS[$('#tTransport').value||'tcp'];
+  $('#targetHostLabel').textContent = hasExit ? 'هاست سرویس روی سرور خروجی' : 'هاست مقصد';
 }
 function syncRoute(){
   const srcSel = $('#tSource'), dstSel = $('#tDest');
@@ -260,13 +284,14 @@ function syncRoute(){
   const host = $('#tTargetHost').value||'127.0.0.1', port = $('#tTargetPort').value||'؟';
   $('#rpFrom').textContent = srcName;
   $('#rpListen').textContent = $('#tListen').value||'؟';
-  $('#rpTo').textContent = ($('#tType').value==='reverse' && dstName ? dstName+' ← ' : '') + host+':'+port;
+  $('#rpTo').textContent = (dstName ? dstName+' ← ' : '') + host+':'+port;
+  updateTransportUI();
 }
 function openTunnelModal(id){
   $('#tunnelForm').reset(); $('#tunnelId').value=''; $('#tTargetHost').value='127.0.0.1';
   $('#tunnelModalTitle').textContent='ساخت تونل';
   $('#tType').disabled=false; $('#tSource').disabled=false;
-  setTunnelType('forward');
+  setTunnelType('forward'); $('#tTransport').value='tcp';
   if(!nodesCache.length){ toast('اول حداقل یک سرور اضافه کن', true); return; }
   if(id){
     const t = tunnelsCache.find(x=>x.id===id); if(!t) return;
@@ -275,6 +300,7 @@ function openTunnelModal(id){
     setTunnelType(t.type); $('#tType').disabled=true;
     $('#tProtocol').value=t.protocol; $('#tSource').value=t.source_node_id; $('#tSource').disabled=true;
     $('#tDest').value=t.dest_node_id||''; $('#tListen').value=t.listen_port;
+    $('#tTransport').value=t.transport||'tcp'; onTypeChange();
     $('#tTargetHost').value=t.target_host; $('#tTargetPort').value=t.target_port;
     $('#tLimit').value = t.traffic_limit_bytes? (t.traffic_limit_bytes/1073741824):'';
     if(t.expires_at) $('#tExpire').value = t.expires_at.slice(0,16);
@@ -292,8 +318,12 @@ $('#tunnelForm').addEventListener('submit', async e=>{
     traffic_limit_gb: $('#tLimit').value? parseFloat($('#tLimit').value): null,
     expires_at: exp? new Date(exp).toISOString(): null};
   try{
-    if(id){ await api('PUT','/api/tunnels/'+id, {...common, dest_node_id: $('#tType').value==='reverse'? +$('#tDest').value : null}); }
-    else{ await api('POST','/api/tunnels', {...common, type:$('#tType').value, source_node_id:+$('#tSource').value, dest_node_id: $('#tType').value==='reverse'? +$('#tDest').value : null}); }
+    const srcId = +$('#tSource').value, dstRaw = $('#tDest').value, dstId = dstRaw? +dstRaw : null;
+    if(dstId && dstId===srcId){ toast('سرور ورودی و خروجی نمی‌توانند یکی باشند', true); return; }
+    if($('#tType').value==='reverse' && !dstId){ toast('برای Reverse سرور خروجی را انتخاب کن', true); return; }
+    const payload = {...common, transport: $('#tTransport').value, dest_node_id: dstId};
+    if(id){ await api('PUT','/api/tunnels/'+id, payload); }
+    else{ await api('POST','/api/tunnels', {...payload, type:$('#tType').value, source_node_id:srcId}); }
     toast('تونل آماده است 🚀'); closeModal('tunnelModal'); loadTunnels();
   }catch(err){ toast(err.message, true); }
 });

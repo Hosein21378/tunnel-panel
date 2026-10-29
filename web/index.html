@@ -229,8 +229,8 @@
     <label>نام تونل *<input id="tName" required placeholder="مثلاً: SSH سرور خانگی"></label>
     <label class="lbl">نوع تونل</label>
     <div class="seg" id="typeSeg">
-      <button type="button" class="seg-btn active" data-type="forward" onclick="setTunnelType('forward')"><b>➡️ Forward</b><small>فوروارد مستقیم پورت</small></button>
-      <button type="button" class="seg-btn" data-type="reverse" onclick="setTunnelType('reverse')"><b>🔁 Reverse</b><small>مقصد پشت NAT است</small></button>
+      <button type="button" class="seg-btn active" data-type="forward" onclick="setTunnelType('forward')"><b>➡️ مستقیم (Direct)</b><small>ورودی به خروجی وصل می‌شود</small></button>
+      <button type="button" class="seg-btn" data-type="reverse" onclick="setTunnelType('reverse')"><b>🔁 معکوس (Reverse)</b><small>خروجی به ورودی وصل می‌شود · پشت NAT</small></button>
     </div>
     <select id="tType" class="hidden"><option value="forward">forward</option><option value="reverse">reverse</option></select>
     <div class="row">
@@ -238,11 +238,21 @@
         <select id="tProtocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></label>
       <label class="grow">سرور مبدا (ورودی) *<select id="tSource" required></select></label>
     </div>
-    <label id="destWrap" class="hidden">سرور مقصد (پشت NAT) *<select id="tDest"></select></label>
+    <label id="destWrap"><span id="destLabel">سرور خروجی (Exit)</span><select id="tDest"></select>
+      <small class="muted" id="destHint"></small></label>
+    <label id="transportWrap">ترنسپورت لینک بین دو سرور
+      <select id="tTransport" onchange="syncRoute()">
+        <option value="tcp">TCP — ساده و پایدار (کانکشن جدا برای هر کاربر)</option>
+        <option value="tcpmux">TCPMux — سریع‌تر (چند استریم روی کانکشن‌های آماده)</option>
+        <option value="ws">WebSocket — عبور از پروکسی/CDN</option>
+        <option value="wss">WSS — وب‌سوکت امن (TLS)</option>
+        <option value="auto">Auto — خودکار (TCP + Mux + WS + WSS)</option>
+      </select>
+      <small class="muted" id="transportHint"></small></label>
     <div class="route-preview"><span id="rpFrom">سرور مبدا</span><i>→ پورت <b id="rpListen">؟</b> →</i><span id="rpTo">مقصد</span></div>
     <div class="row">
       <label class="grow">پورت ورودی *<input id="tListen" type="number" min="1" max="65535" required placeholder="2222" oninput="syncRoute()"></label>
-      <label class="grow">هاست مقصد<input id="tTargetHost" class="ltr" value="127.0.0.1" oninput="syncRoute()"></label>
+      <label class="grow"><span id="targetHostLabel">هاست مقصد</span><input id="tTargetHost" class="ltr" value="127.0.0.1" oninput="syncRoute()"></label>
       <label class="grow">پورت مقصد *<input id="tTargetPort" type="number" min="1" max="65535" required placeholder="22" oninput="syncRoute()"></label>
     </div>
     <div class="row">

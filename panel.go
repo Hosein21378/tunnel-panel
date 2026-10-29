@@ -95,6 +95,14 @@ func nilOrStr(s string) any {
 	return s
 }
 
+func normTransport(tr string) string {
+	switch tr {
+	case "tcpmux", "ws", "wss", "auto":
+		return tr
+	}
+	return "tcp"
+}
+
 func (p *panelServer) tunnelOut(t Tunnel) map[string]any {
 	srcName, dstName := "?", ""
 	for _, n := range p.st.d.Nodes {
@@ -117,7 +125,7 @@ func (p *panelServer) tunnelOut(t Tunnel) map[string]any {
 	return map[string]any{"id": t.ID, "name": t.Name, "type": t.Type, "protocol": t.Protocol,
 		"source_node_id": t.SourceNodeID, "source_node_name": srcName,
 		"dest_node_id": t.DestNodeID, "dest_node_name": dstName,
-		"listen_port": t.ListenPort, "target_host": t.TargetHost, "target_port": t.TargetPort,
+		"listen_port": t.ListenPort, "target_host": t.TargetHost, "target_port": t.TargetPort, "transport": normTransport(t.Transport),
 		"enabled": t.Enabled, "active": tunnelActive(t), "expired": expired, "over_limit": over,
 		"bytes_in": t.BytesIn, "bytes_out": t.BytesOut, "connections": t.Connections,
 		"traffic_limit_bytes": limit, "expires_at": nilOrStr(t.ExpiresAt),
@@ -173,6 +181,9 @@ func validateTunnelInput(st *Store, typ, proto string, srcID, dstID, listen, tar
 	}
 	if typ == "reverse" && proto != "tcp" {
 		return "تونل ریورس فعلا فقط TCP است"
+	}
+	if dstID > 0 && dstID == srcID {
+		return "سرور ورودی و سرور خروجی نمی‌توانند یکی باشند"
 	}
 	if typ == "reverse" && dstID == 0 {
 		return "برای تونل ریورس، سرور مقصد (پشت NAT) را انتخاب کنید"
@@ -473,6 +484,7 @@ func runPanel(host string, port int, dataPath string) error {
 				ListenPort   int      `json:"listen_port"`
 				TargetHost   string   `json:"target_host"`
 				TargetPort   int      `json:"target_port"`
+				Transport    string   `json:"transport"`
 				TrafficGB    *float64 `json:"traffic_limit_gb"`
 				ExpiresAt    *string  `json:"expires_at"`
 			}
@@ -504,7 +516,7 @@ func runPanel(host string, port int, dataPath string) error {
 			tokenVal := randomToken()
 			t := Tunnel{ID: st.d.NextTunID, Name: in.Name, Type: in.Type, Protocol: in.Protocol,
 				SourceNodeID: in.SourceNodeID, DestNodeID: dst, ListenPort: in.ListenPort,
-				TargetHost: in.TargetHost, TargetPort: in.TargetPort, Token: tokenVal,
+				TargetHost: in.TargetHost, TargetPort: in.TargetPort, Transport: normTransport(in.Transport), Token: tokenVal,
 				Enabled: true, OwnerID: u.ID, CreatedAt: nowStr()}
 			st.d.NextTunID++
 			if in.TrafficGB != nil && *in.TrafficGB > 0 {
@@ -585,6 +597,7 @@ func runPanel(host string, port int, dataPath string) error {
 				TargetHost *string  `json:"target_host"`
 				TargetPort *int     `json:"target_port"`
 				DestNodeID *int     `json:"dest_node_id"`
+				Transport  *string  `json:"transport"`
 				TrafficGB  *float64 `json:"traffic_limit_gb"`
 				ExpiresAt  *string  `json:"expires_at"`
 			}
@@ -607,6 +620,9 @@ func runPanel(host string, port int, dataPath string) error {
 				t.Name = *in.Name
 			}
 			t.Protocol, t.ListenPort, t.DestNodeID = proto, listen, dst
+			if in.Transport != nil {
+				t.Transport = normTransport(*in.Transport)
+			}
 			if in.TargetHost != nil {
 				t.TargetHost = *in.TargetHost
 			}
@@ -796,6 +812,7 @@ func runPanel(host string, port int, dataPath string) error {
 		me, _ := p.findNode(id)
 		listen := []map[string]any{}
 		rev := []map[string]any{}
+		acceptDirect := []map[string]any{}
 		for _, t := range st.d.Tunnels {
 			if !tunnelActive(t) {
 				continue
@@ -803,8 +820,23 @@ func runPanel(host string, port int, dataPath string) error {
 			if t.SourceNodeID == id {
 				item := map[string]any{"id": t.ID, "type": t.Type, "protocol": t.Protocol,
 					"listen_port": t.ListenPort, "target_host": t.TargetHost,
-					"target_port": t.TargetPort, "token": t.Token}
+					"target_port": t.TargetPort, "token": t.Token, "transport": normTransport(t.Transport)}
+				if t.Type == "forward" && t.DestNodeID > 0 {
+					if dn, ok := p.findNode(t.DestNodeID); ok {
+						host := dn.Host
+						if host == "" {
+							host = dn.ReportedIP
+						}
+						item["dest_relay_host"] = host
+						item["dest_relay_port"] = dn.RelayPort
+					}
+				}
 				listen = append(listen, item)
+			}
+			if t.Type == "forward" && t.DestNodeID == id {
+				acceptDirect = append(acceptDirect, map[string]any{"id": t.ID, "token": t.Token,
+					"transport": normTransport(t.Transport),
+					"target_host": t.TargetHost, "target_port": t.TargetPort})
 			}
 			if t.Type == "reverse" && t.DestNodeID == id {
 				if src, ok := p.findNode(t.SourceNodeID); ok {
@@ -813,13 +845,13 @@ func runPanel(host string, port int, dataPath string) error {
 						host = src.ReportedIP
 					}
 					rev = append(rev, map[string]any{"id": t.ID, "token": t.Token,
-						"relay_host": host, "relay_port": src.RelayPort,
+						"relay_host": host, "relay_port": src.RelayPort, "transport": normTransport(t.Transport),
 						"target_host": t.TargetHost, "target_port": t.TargetPort})
 				}
 			}
 		}
 		selfUpdate := me.AgentVersion != "" && compareVersions(me.AgentVersion, Version) < 0
-		writeJSON(w, 200, map[string]any{"listen": listen, "reverse_connect": rev, "relay_port": me.RelayPort, "self_update": selfUpdate})
+		writeJSON(w, 200, map[string]any{"listen": listen, "reverse_connect": rev, "accept_direct": acceptDirect, "relay_port": me.RelayPort, "self_update": selfUpdate})
 	})
 	mux.HandleFunc("/api/agent/heartbeat", func(w http.ResponseWriter, r *http.Request) {
 		id, ok := agentTouch(w, r)

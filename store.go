@@ -60,6 +60,7 @@ type Tunnel struct {
 	ListenPort        int    `json:"listen_port"`
 	TargetHost        string `json:"target_host"`
 	TargetPort        int    `json:"target_port"`
+	Transport         string `json:"transport"`
 	Token             string `json:"token"`
 	Enabled           bool   `json:"enabled"`
 	BytesIn           int64  `json:"bytes_in"`
