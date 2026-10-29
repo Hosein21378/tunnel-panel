@@ -303,6 +303,7 @@ func (p *panelServer) tunnelOut(t Tunnel) map[string]any {
 		"source_node_id": t.SourceNodeID, "source_node_name": srcName,
 		"dest_node_id": t.DestNodeID, "dest_node_name": dstName,
 		"listen_port": t.ListenPort, "target_host": t.TargetHost, "target_port": t.TargetPort, "transport": normTransport(t.Transport),
+		"profile": normProfile(t.Profile), "ports": tunnelPorts(t),
 		"enabled": t.Enabled, "active": tunnelActive(t), "expired": expired, "over_limit": over,
 		"bytes_in": t.BytesIn, "bytes_out": t.BytesOut, "connections": t.Connections,
 		"traffic_limit_bytes": limit, "expires_at": nilOrStr(t.ExpiresAt), "link": p.linkFor(t),
@@ -349,7 +350,26 @@ func (p *panelServer) findNode(id int) (Node, bool) {
 	return Node{}, false
 }
 
-func validateTunnelInput(st *Store, typ, proto string, srcID, dstID, listen, target int, excludeID int) string {
+// tunnelPorts نگاشت‌های موثر تونل (سازگاری با تونل‌های قدیمی تک‌پورت)
+func tunnelPorts(t Tunnel) []PortMap {
+	if len(t.Ports) > 0 {
+		return t.Ports
+	}
+	if t.ListenPort > 0 {
+		return []PortMap{{Listen: t.ListenPort, Target: t.TargetPort}}
+	}
+	return nil
+}
+
+func normProfile(pr string) string {
+	switch pr {
+	case "gaming", "ultraspeed":
+		return pr
+	}
+	return "balanced"
+}
+
+func validateTunnelInput(st *Store, typ, proto string, srcID, dstID int, ports []PortMap, excludeID int) string {
 	if typ != "forward" && typ != "reverse" {
 		return "نوع تونل نامعتبر است"
 	}
@@ -363,14 +383,29 @@ func validateTunnelInput(st *Store, typ, proto string, srcID, dstID, listen, tar
 		return "سرور ورودی و سرور خروجی نمی‌توانند یکی باشند"
 	}
 	if typ == "reverse" && dstID == 0 {
-		return "برای تونل ریورس، سرور مقصد (پشت NAT) را انتخاب کنید"
+		return "برای تونل ریورس، سرور خروجی را انتخاب کنید"
 	}
-	if listen < 1 || listen > 65535 || target < 1 || target > 65535 {
-		return "پورت نامعتبر است"
+	if len(ports) == 0 {
+		return "حداقل یک پورت لازم است"
+	}
+	seen := map[int]bool{}
+	for _, pm := range ports {
+		if pm.Listen < 1 || pm.Listen > 65535 || pm.Target < 1 || pm.Target > 65535 {
+			return "پورت نامعتبر است"
+		}
+		if seen[pm.Listen] {
+			return "پورت ورودی تکراری است"
+		}
+		seen[pm.Listen] = true
 	}
 	for _, t := range st.d.Tunnels {
-		if t.ID != excludeID && t.SourceNodeID == srcID && t.ListenPort == listen && t.Enabled {
-			return "این پورت روی سرور مبدا قبلا توسط تونل دیگری استفاده شده"
+		if t.ID == excludeID || t.SourceNodeID != srcID || !t.Enabled {
+			continue
+		}
+		for _, pm := range tunnelPorts(t) {
+			if seen[pm.Listen] {
+				return "یکی از پورت‌های ورودی روی سرور مبدا قبلا توسط تونل دیگری استفاده شده"
+			}
 		}
 	}
 	return ""
@@ -662,6 +697,8 @@ func runPanel(host string, port int, dataPath string) error {
 				TargetHost   string   `json:"target_host"`
 				TargetPort   int      `json:"target_port"`
 				Transport    string   `json:"transport"`
+				Profile      string   `json:"profile"`
+				Ports        []PortMap `json:"ports"`
 				TrafficGB    *float64 `json:"traffic_limit_gb"`
 				ExpiresAt    *string  `json:"expires_at"`
 			}
@@ -673,7 +710,11 @@ func runPanel(host string, port int, dataPath string) error {
 			if in.DestNodeID != nil {
 				dst = *in.DestNodeID
 			}
-			if msg := validateTunnelInput(st, in.Type, in.Protocol, in.SourceNodeID, dst, in.ListenPort, in.TargetPort, 0); msg != "" {
+			ports := in.Ports
+			if len(ports) == 0 {
+				ports = []PortMap{{Listen: in.ListenPort, Target: in.TargetPort}}
+			}
+			if msg := validateTunnelInput(st, in.Type, in.Protocol, in.SourceNodeID, dst, ports, 0); msg != "" {
 				errJSON(w, 400, msg)
 				return
 			}
@@ -692,8 +733,9 @@ func runPanel(host string, port int, dataPath string) error {
 			}
 			tokenVal := randomToken()
 			t := Tunnel{ID: st.d.NextTunID, Name: in.Name, Type: in.Type, Protocol: in.Protocol,
-				SourceNodeID: in.SourceNodeID, DestNodeID: dst, ListenPort: in.ListenPort,
-				TargetHost: in.TargetHost, TargetPort: in.TargetPort, Transport: normTransport(in.Transport), Token: tokenVal,
+				SourceNodeID: in.SourceNodeID, DestNodeID: dst, ListenPort: ports[0].Listen,
+				TargetHost: in.TargetHost, TargetPort: ports[0].Target, Transport: normTransport(in.Transport),
+				Profile: normProfile(in.Profile), Ports: ports, Token: tokenVal,
 				Enabled: true, OwnerID: u.ID, CreatedAt: nowStr()}
 			st.d.NextTunID++
 			if in.TrafficGB != nil && *in.TrafficGB > 0 {
@@ -759,7 +801,7 @@ func runPanel(host string, port int, dataPath string) error {
 				"hints": probeHints(*t, link)})
 		case r.Method == http.MethodPost && action == "toggle":
 			if !t.Enabled {
-				if msg := validateTunnelInput(st, t.Type, t.Protocol, t.SourceNodeID, t.DestNodeID, t.ListenPort, t.TargetPort, t.ID); msg != "" {
+				if msg := validateTunnelInput(st, t.Type, t.Protocol, t.SourceNodeID, t.DestNodeID, tunnelPorts(*t), t.ID); msg != "" {
 					errJSON(w, 400, msg)
 					return
 				}
@@ -780,36 +822,55 @@ func runPanel(host string, port int, dataPath string) error {
 				TargetPort *int     `json:"target_port"`
 				DestNodeID *int     `json:"dest_node_id"`
 				Transport  *string  `json:"transport"`
+				Profile    *string  `json:"profile"`
+				Ports      []PortMap `json:"ports"`
+				SourceNodeID *int   `json:"source_node_id"`
 				TrafficGB  *float64 `json:"traffic_limit_gb"`
 				ExpiresAt  *string  `json:"expires_at"`
 			}
 			_ = readJSON(r, &in)
-			proto, listen, dst := t.Protocol, t.ListenPort, t.DestNodeID
+			proto, dst, src := t.Protocol, t.DestNodeID, t.SourceNodeID
+			typ := t.Type
+			ports := tunnelPorts(*t)
 			if in.Protocol != nil {
 				proto = *in.Protocol
-			}
-			if in.ListenPort != nil {
-				listen = *in.ListenPort
 			}
 			if in.DestNodeID != nil {
 				dst = *in.DestNodeID
 			}
-			if msg := validateTunnelInput(st, t.Type, proto, t.SourceNodeID, dst, listen, t.TargetPort, t.ID); msg != "" {
+			if in.SourceNodeID != nil {
+				src = *in.SourceNodeID
+			}
+			if len(in.Ports) > 0 {
+				ports = in.Ports
+			} else if in.ListenPort != nil || in.TargetPort != nil {
+				l, tg := t.ListenPort, t.TargetPort
+				if in.ListenPort != nil {
+					l = *in.ListenPort
+				}
+				if in.TargetPort != nil {
+					tg = *in.TargetPort
+				}
+				ports = []PortMap{{Listen: l, Target: tg}}
+			}
+			if msg := validateTunnelInput(st, typ, proto, src, dst, ports, t.ID); msg != "" {
 				errJSON(w, 400, msg)
 				return
 			}
 			if in.Name != nil {
 				t.Name = *in.Name
 			}
-			t.Protocol, t.ListenPort, t.DestNodeID = proto, listen, dst
+			t.Protocol, t.DestNodeID, t.SourceNodeID = proto, dst, src
+			t.Ports = ports
+			t.ListenPort, t.TargetPort = ports[0].Listen, ports[0].Target
 			if in.Transport != nil {
 				t.Transport = normTransport(*in.Transport)
 			}
+			if in.Profile != nil {
+				t.Profile = normProfile(*in.Profile)
+			}
 			if in.TargetHost != nil {
 				t.TargetHost = *in.TargetHost
-			}
-			if in.TargetPort != nil {
-				t.TargetPort = *in.TargetPort
 			}
 			if in.TrafficGB != nil {
 				if *in.TrafficGB > 0 {
@@ -1079,20 +1140,23 @@ func runPanel(host string, port int, dataPath string) error {
 				continue
 			}
 			if t.SourceNodeID == id {
-				item := map[string]any{"id": t.ID, "type": t.Type, "protocol": t.Protocol,
-					"listen_port": t.ListenPort, "target_host": t.TargetHost,
-					"target_port": t.TargetPort, "token": t.Token, "transport": normTransport(t.Transport)}
-				if t.Type == "forward" && t.DestNodeID > 0 {
-					if dn, ok := p.findNode(t.DestNodeID); ok {
-						host := dn.Host
-						if host == "" {
-							host = dn.ReportedIP
+				for _, pm := range tunnelPorts(t) {
+					item := map[string]any{"id": t.ID, "type": t.Type, "protocol": t.Protocol,
+						"listen_port": pm.Listen, "target_host": t.TargetHost,
+						"target_port": pm.Target, "token": t.Token, "transport": normTransport(t.Transport),
+						"profile": normProfile(t.Profile)}
+					if t.Type == "forward" && t.DestNodeID > 0 {
+						if dn, ok := p.findNode(t.DestNodeID); ok {
+							host := dn.Host
+							if host == "" {
+								host = dn.ReportedIP
+							}
+							item["dest_relay_host"] = host
+							item["dest_relay_port"] = dn.RelayPort
 						}
-						item["dest_relay_host"] = host
-						item["dest_relay_port"] = dn.RelayPort
 					}
+					listen = append(listen, item)
 				}
-				listen = append(listen, item)
 			}
 			if t.Type == "forward" && t.DestNodeID == id {
 				acceptDirect = append(acceptDirect, map[string]any{"id": t.ID, "token": t.Token,
@@ -1105,9 +1169,12 @@ func runPanel(host string, port int, dataPath string) error {
 					if host == "" {
 						host = src.ReportedIP
 					}
-					rev = append(rev, map[string]any{"id": t.ID, "token": t.Token,
-						"relay_host": host, "relay_port": src.RelayPort, "transport": normTransport(t.Transport),
-						"target_host": t.TargetHost, "target_port": t.TargetPort})
+					for _, pm := range tunnelPorts(t) {
+						rev = append(rev, map[string]any{"id": t.ID, "token": t.Token,
+							"relay_host": host, "relay_port": src.RelayPort, "transport": normTransport(t.Transport),
+							"profile": normProfile(t.Profile),
+							"target_host": t.TargetHost, "target_port": pm.Target})
+					}
 				}
 			}
 		}

@@ -286,6 +286,7 @@ type listenCfg struct {
 	Type          string `json:"type"`
 	Protocol      string `json:"protocol"`
 	Transport     string `json:"transport"`
+	Profile       string `json:"profile"`
 	ListenPort    int    `json:"listen_port"`
 	TargetHost    string `json:"target_host"`
 	TargetPort    int    `json:"target_port"`
@@ -297,6 +298,7 @@ type revCfg struct {
 	ID         int    `json:"id"`
 	Token      string `json:"token"`
 	Transport  string `json:"transport"`
+	Profile    string `json:"profile"`
 	RelayHost  string `json:"relay_host"`
 	RelayPort  int    `json:"relay_port"`
 	TargetHost string `json:"target_host"`
@@ -328,19 +330,24 @@ type agentConfig struct {
 
 func probeKey(id int) int { return -100000 - id }
 
+// profilePools: تعداد ورکر TCP و سشن Mux بر اساس پروفایل کاریز
+func profilePools(profile string) (tcpWorkers, muxSessions int, ping time.Duration) {
+	switch profile {
+	case "gaming":
+		return 8, 4, 3 * time.Second
+	case "ultraspeed":
+		return 10, 6, 5 * time.Second
+	}
+	return 5, 3, 8 * time.Second
+}
+
 // نتایج تست اتصال که باید با هارت‌بیت به پنل برود
 var probeMu sync.Mutex
 var pendingProbes = map[int][]map[string]any{}
 
 func runProbeDial(ctx context.Context, pc *probeCfg) {
 	addr := net.JoinHostPort(pc.RelayHost, strconv.Itoa(pc.RelayPort))
-	results := []map[string]any{}
-	for _, tr := range []string{"tcp", "tcpmux", "ws", "wss"} {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
+	attempt := func(tr string) map[string]any {
 		res := map[string]any{"transport": tr, "ok": false, "rtt_ms": int64(0), "error": ""}
 		start := time.Now()
 		init, _ := json.Marshal(map[string]any{"type": "register", "mode": map[bool]string{true: "mux", false: ""}[tr != "tcp"],
@@ -348,8 +355,7 @@ func runProbeDial(ctx context.Context, pc *probeCfg) {
 		ft, err := dialLink(addr, tr, init)
 		if err != nil {
 			res["error"] = err.Error()
-			results = append(results, res)
-			continue
+			return res
 		}
 		dialMs := time.Since(start).Milliseconds()
 		// زنده‌بودن لینک: اگر طرف مقابل سریع بست یعنی رد شده
@@ -383,12 +389,45 @@ func runProbeDial(ctx context.Context, pc *probeCfg) {
 			res["error"] = "اتصال از سمت ورودی بسته شد"
 		}
 		_ = ft.Close()
-		results = append(results, res)
+		return res
+	}
+	// چند دور تلاش: ممکن است ایجنت ورودی هنوز توکن تست را نگرفته باشد
+	best := map[string]map[string]any{}
+	for round := 0; round < 8; round++ {
+		for _, tr := range []string{"tcp", "tcpmux", "ws", "wss"} {
+			if prev, ok := best[tr]; ok && prev["ok"] == true {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			best[tr] = attempt(tr)
+		}
+		allOK := true
+		for _, tr := range []string{"tcp", "tcpmux", "ws", "wss"} {
+			if best[tr]["ok"] != true {
+				allOK = false
+			}
+		}
+		if allOK {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+	}
+	results := []map[string]any{}
+	for _, tr := range []string{"tcp", "tcpmux", "ws", "wss"} {
+		results = append(results, best[tr])
 	}
 	probeMu.Lock()
 	pendingProbes[pc.ProbeID] = results
 	probeMu.Unlock()
-	fmt.Printf("[probe %d] link test done: %v\n", pc.ProbeID, results)
+	fmt.Printf("[probe %d] link test done\n", pc.ProbeID)
 }
 
 // ---------- Reverse: هاب سمت سرور عمومی ----------
@@ -461,11 +500,12 @@ func targetDial(host string, port int) (net.Conn, error) {
 }
 
 type relayInit struct {
-	Type      string `json:"type"`
-	Mode      string `json:"mode"`
-	Transport string `json:"transport"`
-	TunnelID  int    `json:"tunnel_id"`
-	Token     string `json:"token"`
+	Type       string `json:"type"`
+	Mode       string `json:"mode"`
+	Transport  string `json:"transport"`
+	TunnelID   int    `json:"tunnel_id"`
+	Token      string `json:"token"`
+	TargetPort int    `json:"target_port"`
 }
 func (h *relayHub) pool(id int) chan pooledConn {
 	h.mu.Lock()
@@ -558,6 +598,9 @@ func (h *relayHub) handleRawInit(bc *bufferedConn, reader *bufio.Reader, init re
 		h.mu.Lock()
 		tgt := h.directTargets[init.TunnelID]
 		h.mu.Unlock()
+		if init.TargetPort > 0 {
+			tgt.TargetPort = init.TargetPort
+		}
 		_ = bc.SetReadDeadline(time.Time{})
 		local, err := targetDial(tgt.TargetHost, tgt.TargetPort)
 		if err != nil {
@@ -841,16 +884,17 @@ func runServices(ctx context.Context, cfg agentConfig) {
 				go func() { defer wg.Done(); reverseMuxWorker(ctx, rc, transport) }()
 			}
 		}
+		tcpN, muxN, _ := profilePools(rc.Profile)
 		switch tr {
 		case "tcpmux", "ws", "wss":
-			spawnMux(tr, 3)
+			spawnMux(tr, muxN)
 		case "auto":
-			spawnTCP(3)
+			spawnTCP(maxInt(tcpN-2, 2))
 			spawnMux("tcpmux", 1)
 			spawnMux("ws", 1)
 			spawnMux("wss", 1)
 		default:
-			spawnTCP(5)
+			spawnTCP(tcpN)
 		}
 	}
 	if cfg.ProbeDial != nil {
@@ -896,7 +940,7 @@ func serveForwardTCP(ctx context.Context, set *serviceSet, t listenCfg) {
 					return
 				}
 				defer up.Close()
-				hello, _ := json.Marshal(map[string]any{"type": "connect", "tunnel_id": t.ID, "token": t.Token})
+				hello, _ := json.Marshal(map[string]any{"type": "connect", "tunnel_id": t.ID, "token": t.Token, "target_port": t.TargetPort})
 				if _, err := up.Write(append(hello, '\n')); err != nil {
 					return
 				}
@@ -1032,7 +1076,8 @@ func reverseMuxWorker(ctx context.Context, rc revCfg, transport string) {
 		}
 		sess := newMuxSession(ft, transport, rc.ID, true, dialLocal)
 		markExitTrans(rc.ID, transport, sess, 0)
-		sess.StartPinger()
+		_, _, pingEvery := profilePools(rc.Profile)
+		sess.StartPingerEvery(pingEvery)
 		done := make(chan struct{})
 		go func() { sess.Run(); close(done) }()
 		select {

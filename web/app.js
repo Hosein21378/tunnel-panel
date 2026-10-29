@@ -133,13 +133,6 @@ function roundBar(ctx,x,y,w,h){ const r=Math.min(3,w/2,h); ctx.beginPath(); ctx.
 /* ---------- سرورها ---------- */
 async function loadNodes(render=true){
   nodesCache = await api('GET','/api/nodes');
-  const opts = nodesCache.map(n=>`<option value="${n.id}">${esc(n.name)}${n.online?' · آنلاین':''}</option>`).join('');
-  // انتخاب فعلی کاربر در فرم تونل حفظ شود (باگ برگشتن به اولین سرور)
-  const srcEl = $('#tSource'), dstEl = $('#tDest');
-  const prevSrc = srcEl.value, prevDst = dstEl.value;
-  srcEl.innerHTML = opts; dstEl.innerHTML = '<option value="">— بدون سرور خروجی (مستقیم به IP) —</option>' + opts;
-  if(prevSrc && [...srcEl.options].some(o=>o.value===prevSrc)) srcEl.value = prevSrc;
-  if(prevDst && [...dstEl.options].some(o=>o.value===prevDst)) dstEl.value = prevDst;
   if(render) renderNodes();
 }
 function renderNodes(){
@@ -223,9 +216,9 @@ function renderTunnels(){
     const status = !t.enabled ? ['off','غیرفعال'] : t.expired ? ['warn','منقضی شده'] : t.over_limit ? ['warn','ترافیک تمام شد'] : ['on','در حال کار'];
     return `<div class="tunnel-card" style="animation-delay:${Math.min(i*0.05,0.3)}s">
     <div class="tc-head"><span class="type-badge ${t.type}">${t.type==='reverse'?'🔁 REVERSE':'➡️ FORWARD'}</span>
-      <div><h4>${esc(t.name)}</h4><small>${t.protocol.toUpperCase()}${t.dest_node_id?' · لینک '+({tcp:'TCP',tcpmux:'TCPMux',ws:'WebSocket',wss:'WSS',auto:'Auto'}[t.transport||'tcp']):''} · ساخته‌شده ${fmtDate(t.created_at)}</small></div>
+      <div><h4>${esc(t.name)}</h4><small>${t.protocol.toUpperCase()}${t.dest_node_id?' · لینک '+({tcp:'TCP',tcpmux:'TCPMux',ws:'WebSocket',wss:'WSS',auto:'Auto'}[t.transport||'tcp']):''} · ${ {balanced:'متعادل',gaming:'گیمینگ',ultraspeed:'سرعت بالا'}[t.profile||'balanced'] } · ساخته‌شده ${fmtDate(t.created_at)}</small></div>
       <span class="status-pill ${status[0]}">${status[1]}</span></div>
-    <div class="route"><span class="node-chip">${nodeName(t.source_node_id)}</span><span class="port">:${t.listen_port}</span><span class="arrow">──▶</span>${t.dest_node_id?`<span class="node-chip">${nodeName(t.dest_node_id)}</span><span class="arrow">──▶</span>`:''}<span class="target">${esc(t.target_host)}:${t.target_port}</span></div>
+    <div class="route"><span class="node-chip">${nodeName(t.source_node_id)}</span><span class="port">:${t.listen_port}</span>${(t.ports&&t.ports.length>1)?`<span class="port-chip">+${(t.ports.length-1).toLocaleString('fa-IR')} پورت</span>`:''}<span class="arrow">──▶</span>${t.dest_node_id?`<span class="node-chip">${nodeName(t.dest_node_id)}</span><span class="arrow">──▶</span>`:''}<span class="target">${esc(t.target_host)}:${t.target_port}</span></div>
     <div class="linkline">${linkBadge(t)}</div>
     <div class="traf">
       <div><span>ورودی ↓</span><b>${fmtBytes(t.bytes_in)}</b></div>
@@ -258,7 +251,7 @@ function linkBadge(t){
   }
 }
 async function runLinkTest(){
-  const srcId = +$('#tSource').value, dstId = +$('#tDest').value;
+  const srcId = wiz.srcId, dstId = wiz.dstId;
   const box = $('#linkTestResult');
   if(!srcId || !dstId){ box.innerHTML = '<p class="hint">اول سرور ورودی و خروجی را انتخاب کن.</p>'; return; }
   if(srcId === dstId){ box.innerHTML = '<p class="hint">سرور ورودی و خروجی نمی‌توانند یکی باشند.</p>'; return; }
@@ -290,8 +283,7 @@ async function runLinkTest(){
   $('#linkTestBtn').disabled = false;
 }
 function applyTransport(tr){
-  $('#tTransport').value = tr;
-  syncRoute();
+  wizSetTrans(tr);
   toast('ترنسپورت روی ' + (TRANS_FA[tr]||tr) + ' تنظیم شد ✅');
 }
 let probeTunnelId = null;
@@ -329,104 +321,231 @@ async function openProbe(id){
       ${(r.hints||[]).map(h=>`<p class="hint">💡 ${esc(h)}</p>`).join('')}`;
   }catch(e){ $('#probeBody').innerHTML = '<p class="hint">خطا: '+esc(e.message)+'</p>'; }
 }
-function setTunnelType(type){
-  $('#tType').value = type;
-  document.querySelectorAll('#typeSeg .seg-btn').forEach(b=>b.classList.toggle('active', b.dataset.type===type));
-  onTypeChange(); syncRoute();
-}
-function onTypeChange(){
-  const rev = $('#tType').value==='reverse';
-  $('#tProtocol').disabled = rev;
-  if(rev) $('#tProtocol').value='tcp';
-  const dst = $('#tDest'), src = $('#tSource');
-  $('#destLabel').textContent = rev ? 'سرور خروجی (Exit) * — به سرویس واقعی می‌رسد' : 'سرور خروجی (Exit) — کجا ترافیک تحویل شود؟';
-  $('#destHint').textContent = rev
-    ? 'در حالت Reverse سرور خروجی خودش به ورودی وصل می‌شود؛ هیچ پورتی روی خروجی باز نمی‌شود و پشت NAT هم کار می‌کند.'
-    : 'اگر سرور خروجی انتخاب شود، ترافیک از ورودی به ایجنت خروجی می‌رسد و آنجا به سرویس مقصد وصل می‌شود. خالی = اتصال مستقیم به IP مقصد.';
-  dst.required = rev;
-  if(rev && (!dst.value || dst.value===src.value)){
-    const other = nodesCache.find(n=>String(n.id)!==String(src.value));
-    if(other) dst.value = other.id;
-  }
-  updateTransportUI();
-}
-const TRANSPORT_HINTS = {
-  tcp:'برای هر کاربر یک کانکشن جدا بین دو سرور ساخته می‌شود؛ ساده‌ترین و سازگارترین انتخاب.',
-  tcpmux:'چند کانکشن آماده بین دو سرور نگه داشته می‌شود و ترافیک همه کاربران روی آن‌ها مالتی‌پلکس می‌شود؛ سربار کمتر و سرعت بیشتر.',
-  ws:'لینک داخل WebSocket رد می‌شود؛ وقتی بین دو سرور پروکسی یا CDN هست یا ترافیک باید شبیه وب دیده شود.',
-  wss:'همان WebSocket ولی با TLS؛ وقتی امنیت یا عبور از فایروال‌های سخت‌گیر مهم است.',
-  auto:'سرور خروجی هم‌زمان با TCP و Mux و WS و WSS وصل می‌شود و هرکدام آماده بود استفاده می‌شود؛ مقاوم‌ترین انتخاب.'
-};
 let customHost = false;
 function toggleCustomHost(ev){
   if(ev) ev.preventDefault();
   customHost = !customHost;
-  updateTransportUI();
+  wizSyncAddr();
   if(customHost) $('#tTargetHost').focus();
 }
-function updateTransportUI(){
-  const hasExit = !!$('#tDest').value;
-  const active = hasExit || $('#tType').value==='reverse';
-  $('#transportWrap').style.display = active ? '' : 'none';
-  if(active) $('#transportHint').textContent = TRANSPORT_HINTS[$('#tTransport').value||'tcp'];
-  $('#targetHostLabel').textContent = hasExit ? 'هاست سرویس روی سرور خروجی' : 'هاست مقصد';
-  // وقتی سرور خروجی مشخص است، سرویس روی همان سرور است و فیلد هاست لازم نیست
+/* ================= ویزارد ساخت تونل (مدل کاریز) ================= */
+const wiz = { step: 1, editingId: null, direction: 'reverse', transport: 'auto', profile: 'balanced',
+  srcId: null, dstId: null, nameEdited: false };
+const DIR_FA = { reverse: 'معکوس (Reverse)', forward: 'مستقیم (Direct)' };
+const PROF_FA = { balanced: 'متعادل', gaming: 'گیمینگ', ultraspeed: 'حداکثر سرعت' };
+
+function wizNodeCard(n, selected, role){
+  const old = n.agent_version && typeof compareVer === 'function' ? '' : '';
+  return `<button type="button" class="srv-card ${selected?'sel':''}" onclick="wizPickServer('${role}', ${n.id})">
+    <span class="dot ${n.online?'on':'off'}"></span>
+    <span class="srv-main"><b>${esc(n.name)}</b><small class="ltr">${esc(n.host||n.reported_ip||'بدون آدرس')}</small></span>
+    <span class="srv-meta">${n.online?'آنلاین':'آفلاین'}${n.agent_version?' · v'+esc(n.agent_version):''}</span>
+  </button>`;
+}
+function renderWizServers(){
+  $('#wEntryList').innerHTML = nodesCache.map(n=>wizNodeCard(n, wiz.srcId===n.id, 'src')).join('') || '<p class="muted">هنوز سروری نیست</p>';
+  $('#wExitList').innerHTML = nodesCache.map(n=>wizNodeCard(n, wiz.dstId===n.id, 'dst')).join('') || '<p class="muted">هنوز سروری نیست</p>';
+}
+function wizPickServer(role, id){
+  if(role==='src') wiz.srcId = id; else wiz.dstId = id;
+  renderWizServers(); wizSyncName(); wizSyncAddr();
+}
+function wizSyncName(){
+  if(wiz.nameEdited) return;
+  const a = nodesCache.find(n=>n.id===wiz.srcId), b = nodesCache.find(n=>n.id===wiz.dstId);
+  if(a && b) $('#wName').value = a.name + ' → ' + b.name;
+}
+function wizSetDir(d){
+  wiz.direction = d;
+  document.querySelectorAll('#wDirSeg .seg-btn').forEach(b=>b.classList.toggle('active', b.dataset.dir===d));
+  wizSyncProto(); wizSyncAddr();
+}
+function wizSetTrans(tr){
+  wiz.transport = tr;
+  document.querySelectorAll('#wTransGrid .trans-card').forEach(b=>b.classList.toggle('active', b.dataset.tr===tr));
+  wizSyncAddr();
+}
+function wizSetProfile(pr){
+  wiz.profile = pr;
+  document.querySelectorAll('#wProfileSeg .seg-btn').forEach(b=>b.classList.toggle('active', b.dataset.prof===pr));
+}
+function wizSyncProto(){
+  const rev = wiz.direction==='reverse';
+  $('#wProtocol').disabled = rev;
+  if(rev) $('#wProtocol').value = 'tcp';
+}
+function nodeAddr(n){ return n ? (n.host || n.reported_ip || '') : ''; }
+function wizSyncAddr(){
+  const a = nodesCache.find(n=>n.id===wiz.srcId), b = nodesCache.find(n=>n.id===wiz.dstId);
+  const firstPort = (parsePortsSpec($('#wPorts').value).ports[0]||{}).listen;
+  $('#wAddrPreview').textContent = a ? (nodeAddr(a)||a.name) + ':' + (firstPort||'····') : '—';
+  $('#wAddrEntry').textContent = a ? a.name : '—';
+  $('#wAddrHost').textContent = a ? (nodeAddr(a)||'—') : '—';
+  $('#wAddrMode').textContent = (DIR_FA[wiz.direction]||'') + ' · ' + (TRANS_FA[wiz.transport]||wiz.transport) + ' · ' + (PROF_FA[wiz.profile]||'');
+  const hasExit = !!wiz.dstId;
   $('#targetHostWrap').style.display = (hasExit && !customHost) ? 'none' : '';
   $('#customHostRow').classList.toggle('hidden', !hasExit);
-  $('#linkTestBox').classList.toggle('hidden', !hasExit);
+  $('#targetHostLabel').textContent = hasExit ? 'هاست سرویس روی خروجی' : 'هاست مقصد';
+  if(b){ /* مقصد برای نمایش مسیر */ }
 }
-function syncRoute(){
-  const srcSel = $('#tSource'), dstSel = $('#tDest');
-  const srcName = srcSel.options[srcSel.selectedIndex]?.textContent.split(' ·')[0] || 'سرور مبدا';
-  const dstName = dstSel.options[dstSel.selectedIndex]?.textContent.split(' ·')[0] || '';
-  const host = $('#tTargetHost').value||'127.0.0.1', port = $('#tTargetPort').value||'؟';
-  $('#rpFrom').textContent = srcName;
-  $('#rpListen').textContent = $('#tListen').value||'؟';
-  $('#rpTo').textContent = (dstName ? dstName+' ← ' : '') + host+':'+port;
-  updateTransportUI();
+
+/* پارس سینتکس پورت کاریز: 443, 8080-8090, 2053=53 */
+function parsePortsSpec(spec){
+  spec = (spec||'').trim();
+  if(!spec) return { ports: [], error: '' };
+  const out = []; const seen = new Set();
+  for(const partRaw of spec.split(',')){
+    const part = partRaw.trim(); if(!part) continue;
+    let listenExpr = part, targetExpr = null;
+    if(part.includes('=')){ const sp = part.split('='); listenExpr = sp[0].trim(); targetExpr = sp[1].trim(); }
+    const parseExpr = (x)=>{
+      if(x.includes('-')){ const [a,b] = x.split('-').map(v=>parseInt(v.trim(),10)); return [a,b]; }
+      const v = parseInt(x,10); return [v,v];
+    };
+    const [l1,l2] = parseExpr(listenExpr);
+    const [t1] = targetExpr!==null ? parseExpr(targetExpr) : [l1];
+    if(!(l1>=1 && l2<=65535 && l2>=l1)) return { ports: [], error: 'بازه پورت نامعتبر: ' + part };
+    if(l2-l1 > 100) return { ports: [], error: 'هر بازه حداکثر ۱۰۰ پورت' };
+    for(let lp=l1; lp<=l2; lp++){
+      const tp = t1 + (lp - l1);
+      if(!(tp>=1 && tp<=65535)) return { ports: [], error: 'پورت مقصد نامعتبر: ' + part };
+      if(seen.has(lp)) return { ports: [], error: 'پورت تکراری: ' + lp };
+      seen.add(lp); out.push({ listen: lp, target: tp });
+    }
+  }
+  if(out.length > 200) return { ports: [], error: 'حداکثر ۲۰۰ پورت در یک تونل' };
+  return { ports: out, error: '' };
+}
+function renderPortsPreview(){
+  const { ports, error } = parsePortsSpec($('#wPorts').value);
+  const box = $('#wPortsPreview');
+  if(error){ box.innerHTML = '<p class="hint">⚠️ ' + esc(error) + '</p>'; return ports; }
+  if(!ports.length){ box.innerHTML = '<p class="muted small">خالی بگذاری، یک پورت آزاد خودکار انتخاب می‌شود.</p>'; wizSyncAddr(); return ports; }
+  box.innerHTML = ports.slice(0, 24).map(pm=>`<span class="port-chip ltr">:${pm.listen} ← :${pm.target}</span>`).join('')
+    + (ports.length>24 ? `<span class="port-chip">+${(ports.length-24).toLocaleString('fa-IR')} پورت دیگر</span>` : '');
+  wizSyncAddr();
+  return ports;
+}
+function suggestPort(){
+  const used = new Set();
+  tunnelsCache.forEach(t=>{ if(t.source_node_id===wiz.srcId) (t.ports||[{listen:t.listen_port}]).forEach(pm=>used.add(pm.listen)); });
+  parsePortsSpec($('#wPorts').value).ports.forEach(pm=>used.add(pm.listen));
+  let p = 3080; while(used.has(p)) p++;
+  return p;
+}
+function wizError(msg){
+  const e = $('#wizError');
+  e.textContent = msg || ''; e.classList.toggle('hidden', !msg);
+}
+function wizShowStep(){
+  document.querySelectorAll('#wizSteps .wstep').forEach(el=>{
+    const st = +el.dataset.step;
+    el.classList.toggle('active', st===wiz.step);
+    el.classList.toggle('done', st<wiz.step);
+  });
+  document.querySelectorAll('.wiz-pane').forEach(pn=>pn.classList.toggle('hidden', +pn.dataset.pane!==wiz.step));
+  $('#wizBack').classList.toggle('hidden', wiz.step===1);
+  $('#wizNext').classList.toggle('hidden', wiz.step===5);
+  $('#wizBuild').classList.toggle('hidden', wiz.step!==5);
+  $('#wizBuild').textContent = wiz.editingId ? '💾 ذخیره تغییرات' : '🚀 ساخت تونل';
+  if(wiz.step===3) wizSyncAddr();
+  if(wiz.step===5) renderWizReview();
+}
+function wizValidateStep(){
+  if(wiz.step===1){
+    if(!wiz.srcId) return 'سرور ورودی (Entry) را انتخاب کن';
+    if(!wiz.dstId) return 'سرور خروجی (Exit) را انتخاب کن';
+    if(wiz.srcId===wiz.dstId) return 'سرور ورودی و خروجی نمی‌توانند یکی باشند';
+  }
+  if(wiz.step===4){
+    const { error } = parsePortsSpec($('#wPorts').value);
+    if(error) return error;
+  }
+  return '';
+}
+function wizNav(dir){
+  wizError('');
+  if(dir>0){
+    const err = wizValidateStep();
+    if(err){ wizError(err); return; }
+    if(wiz.step===3 && !$('#wPorts').value.trim()) $('#wPorts').value = String(suggestPort());
+    if(wiz.step===4) renderPortsPreview();
+    wiz.step = Math.min(5, wiz.step+1);
+  } else wiz.step = Math.max(1, wiz.step-1);
+  wizShowStep();
+}
+function renderWizReview(){
+  const a = nodesCache.find(n=>n.id===wiz.srcId), b = nodesCache.find(n=>n.id===wiz.dstId);
+  const { ports } = parsePortsSpec($('#wPorts').value);
+  const host = (wiz.dstId && !customHost) ? '127.0.0.1' : ($('#tTargetHost').value||'127.0.0.1');
+  $('#wReview').innerHTML = `
+    <div><span>نام</span><b>${esc($('#wName').value||'—')}</b></div>
+    <div><span>ورودی (Entry)</span><b>${a?esc(a.name):'—'}</b></div>
+    <div><span>خروجی (Exit)</span><b>${b?esc(b.name):'—'}</b></div>
+    <div><span>جهت</span><b>${DIR_FA[wiz.direction]}</b></div>
+    <div><span>ترنسپورت / پروفایل</span><b>${TRANS_FA[wiz.transport]||wiz.transport} · ${PROF_FA[wiz.profile]}</b></div>
+    <div><span>پروتکل / سرویس</span><b>${$('#wProtocol').value.toUpperCase()} · <span class="ltr">${esc(host)}</span></b></div>
+    <div><span>پورت‌ها</span><b class="ltr">${ports.map(pm=>pm.listen+'→'+pm.target).join(', ')||'—'}</b></div>`;
 }
 function openTunnelModal(id){
-  $('#tunnelForm').reset(); $('#tunnelId').value=''; $('#tTargetHost').value='127.0.0.1';
-  $('#tunnelModalTitle').textContent='ساخت تونل';
-  $('#tType').disabled=false; $('#tSource').disabled=false;
-  setTunnelType('forward'); $('#tTransport').value='tcp'; customHost=false; $('#linkTestResult').innerHTML='';
+  wiz.step = 1; wiz.editingId = id||null; wiz.nameEdited = false;
+  wiz.direction = 'reverse'; wiz.transport = 'auto'; wiz.profile = 'balanced';
+  wiz.srcId = null; wiz.dstId = null; customHost = false;
+  $('#wName').value=''; $('#wPorts').value=''; $('#tTargetHost').value='127.0.0.1';
+  $('#tLimit').value=''; $('#tExpire').value=''; $('#linkTestResult').innerHTML='';
+  $('#tunnelModalTitle').textContent = 'ساخت تونل';
   if(!nodesCache.length){ toast('اول حداقل یک سرور اضافه کن', true); return; }
+  if(nodesCache[0]) wiz.srcId = nodesCache[0].id;
+  if(nodesCache[1]) wiz.dstId = nodesCache[1].id;
   if(id){
     const t = tunnelsCache.find(x=>x.id===id); if(!t) return;
-    $('#tunnelModalTitle').textContent='ویرایش: '+t.name;
-    $('#tunnelId').value=t.id; $('#tName').value=t.name;
-    setTunnelType(t.type); $('#tType').disabled=true;
-    $('#tProtocol').value=t.protocol; $('#tSource').value=t.source_node_id; $('#tSource').disabled=true;
-    $('#tDest').value=t.dest_node_id||''; $('#tListen').value=t.listen_port;
-    $('#tTransport').value=t.transport||'tcp';
+    wiz.editingId = t.id;
+    $('#tunnelModalTitle').textContent = 'ویرایش: ' + t.name;
+    $('#wName').value = t.name; wiz.nameEdited = true;
+    wiz.direction = t.type; wiz.transport = t.transport||'auto'; wiz.profile = t.profile||'balanced';
+    wiz.srcId = t.source_node_id; wiz.dstId = t.dest_node_id||null;
+    const ports = (t.ports && t.ports.length ? t.ports : [{listen:t.listen_port, target:t.target_port}]);
+    $('#wPorts').value = ports.map(pm=> pm.listen===pm.target ? String(pm.listen) : pm.listen+'='+pm.target).join(', ');
+    $('#wProtocol').value = t.protocol||'tcp';
+    $('#tTargetHost').value = t.target_host||'127.0.0.1';
     customHost = !['127.0.0.1','localhost',''].includes(t.target_host||'127.0.0.1');
-    onTypeChange();
-    $('#tTargetHost').value=t.target_host; $('#tTargetPort').value=t.target_port;
-    $('#tLimit').value = t.traffic_limit_bytes? (t.traffic_limit_bytes/1073741824):'';
+    $('#tLimit').value = t.traffic_limit_bytes ? (t.traffic_limit_bytes/1073741824) : '';
     if(t.expires_at) $('#tExpire').value = t.expires_at.slice(0,16);
   }
-  syncRoute();
+  document.querySelectorAll('#wDirSeg .seg-btn').forEach(b=> b.disabled = !!id);
+  wizSetDir(wiz.direction); wizSetTrans(wiz.transport); wizSetProfile(wiz.profile);
+  renderWizServers(); wizSyncName(); wizSyncProto(); renderPortsPreview(); wizError('');
+  wizShowStep();
   $('#tunnelModal').classList.remove('hidden');
 }
-['tSource','tDest'].forEach(id=> document.addEventListener('change', e=>{ if(e.target.id===id) syncRoute(); }));
-$('#tunnelForm').addEventListener('submit', async e=>{
-  e.preventDefault();
-  const id = $('#tunnelId').value;
+async function wizSubmit(){
+  wizError('');
+  let { ports, error } = parsePortsSpec($('#wPorts').value);
+  if(error){ wizError(error); wiz.step = 4; wizShowStep(); return; }
+  if(!ports.length) ports = [{ listen: suggestPort(), target: suggestPort() }];
+  if(ports.length===1 && !$('#wPorts').value.trim()){
+    // پورت خودکار: همان پورت روی خروجی هم باز می‌شود
+    const sp = ports[0].listen; ports = [{ listen: sp, target: sp }];
+  }
   const exp = $('#tExpire').value;
-  const common = {name:$('#tName').value, protocol:$('#tProtocol').value, listen_port:+$('#tListen').value,
-    target_host: ($('#tDest').value && !customHost) ? '127.0.0.1' : ($('#tTargetHost').value||'127.0.0.1'), target_port:+$('#tTargetPort').value,
-    traffic_limit_gb: $('#tLimit').value? parseFloat($('#tLimit').value): null,
-    expires_at: exp? new Date(exp).toISOString(): null};
+  const name = $('#wName').value.trim();
+  if(!name){ wizError('نام تونل را وارد کن'); wiz.step = 1; wizShowStep(); return; }
+  const payload = {
+    name, type: wiz.direction, protocol: $('#wProtocol').value,
+    transport: wiz.transport, profile: wiz.profile,
+    source_node_id: wiz.srcId, dest_node_id: wiz.dstId,
+    ports,
+    target_host: (wiz.dstId && !customHost) ? '127.0.0.1' : ($('#tTargetHost').value||'127.0.0.1'),
+    traffic_limit_gb: $('#tLimit').value ? parseFloat($('#tLimit').value) : null,
+    expires_at: exp ? new Date(exp).toISOString() : null,
+  };
   try{
-    const srcId = +$('#tSource').value, dstRaw = $('#tDest').value, dstId = dstRaw? +dstRaw : null;
-    if(dstId && dstId===srcId){ toast('سرور ورودی و خروجی نمی‌توانند یکی باشند', true); return; }
-    if($('#tType').value==='reverse' && !dstId){ toast('برای Reverse سرور خروجی را انتخاب کن', true); return; }
-    const payload = {...common, transport: $('#tTransport').value, dest_node_id: dstId};
-    if(id){ await api('PUT','/api/tunnels/'+id, payload); }
-    else{ await api('POST','/api/tunnels', {...payload, type:$('#tType').value, source_node_id:srcId}); }
-    toast('تونل آماده است 🚀'); closeModal('tunnelModal'); loadTunnels();
-  }catch(err){ toast(err.message, true); }
-});
+    if(wiz.editingId) await api('PUT','/api/tunnels/'+wiz.editingId, payload);
+    else await api('POST','/api/tunnels', payload);
+    toast(wiz.editingId ? 'تغییرات ذخیره شد 💾' : 'تونل ساخته شد 🚀');
+    closeModal('tunnelModal'); loadTunnels();
+  }catch(err){ wizError(err.message); }
+}
 async function toggleTunnel(id){ try{ await api('POST',`/api/tunnels/${id}/toggle`); loadTunnels(); }catch(e){ toast(e.message,true); } }
 async function resetTraffic(id){ if(!confirm('آمار ترافیک این تونل صفر شود؟')) return; try{ await api('POST',`/api/tunnels/${id}/reset-traffic`); loadTunnels(); toast('آمار صفر شد'); }catch(e){ toast(e.message,true); } }
 async function delTunnel(id){ if(!confirm('این تونل حذف شود؟')) return; try{ await api('DELETE','/api/tunnels/'+id); toast('تونل حذف شد'); loadTunnels(); }catch(e){ toast(e.message,true); } }

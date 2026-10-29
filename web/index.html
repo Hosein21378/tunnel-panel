@@ -220,52 +220,103 @@
 </div></div>
 
 <!-- ===== مودال تونل ===== -->
+<!-- ===== مودال تونل (ویزارد کاریز) ===== -->
 <div id="tunnelModal" class="modal hidden"><div class="modal-card wide">
   <button class="x" onclick="closeModal('tunnelModal')">✕</button>
   <div class="modal-ic aqua-bg">🔀</div>
   <h3 id="tunnelModalTitle">ساخت تونل</h3>
-  <form id="tunnelForm">
-    <input type="hidden" id="tunnelId">
-    <label>نام تونل *<input id="tName" required placeholder="مثلاً: SSH سرور خانگی"></label>
-    <label class="lbl">نوع تونل</label>
-    <div class="seg" id="typeSeg">
-      <button type="button" class="seg-btn active" data-type="forward" onclick="setTunnelType('forward')"><b>➡️ مستقیم (Direct)</b><small>ورودی به خروجی وصل می‌شود</small></button>
-      <button type="button" class="seg-btn" data-type="reverse" onclick="setTunnelType('reverse')"><b>🔁 معکوس (Reverse)</b><small>خروجی به ورودی وصل می‌شود · پشت NAT</small></button>
+  <div class="wiz-steps" id="wizSteps">
+    <span data-step="1" class="wstep active">۱ · سرورها</span>
+    <span data-step="2" class="wstep">۲ · انتقال</span>
+    <span data-step="3" class="wstep">۳ · آدرس</span>
+    <span data-step="4" class="wstep">۴ · پورت‌ها</span>
+    <span data-step="5" class="wstep">۵ · ساخت</span>
+  </div>
+
+  <!-- گام ۱: سرورها -->
+  <div class="wiz-pane" data-pane="1">
+    <label>نام تونل<input id="wName" placeholder="خودکار از روی دو سرور ساخته می‌شود" oninput="wiz.nameEdited=true"></label>
+    <label class="lbl">🟢 سرور ورودی (Entry) — کاربرها به این وصل می‌شوند</label>
+    <div class="srv-pick" id="wEntryList"></div>
+    <label class="lbl">🔵 سرور خروجی (Exit) — به سرویس واقعی می‌رسد</label>
+    <div class="srv-pick" id="wExitList"></div>
+    <p class="muted small">هر دو سرور باید مشخص باشند؛ تونل بین همین دو تا ساخته می‌شود.</p>
+  </div>
+
+  <!-- گام ۲: انتقال -->
+  <div class="wiz-pane hidden" data-pane="2">
+    <label class="lbl">جهت اتصال</label>
+    <div class="seg" id="wDirSeg">
+      <button type="button" class="seg-btn active" data-dir="reverse" onclick="wizSetDir('reverse')"><b>🔁 معکوس (Reverse)</b><small>خروجی به ورودی وصل می‌شود · پشت NAT هم کار می‌کند</small></button>
+      <button type="button" class="seg-btn" data-dir="forward" onclick="wizSetDir('forward')"><b>➡️ مستقیم (Direct)</b><small>ورودی به خروجی وصل می‌شود</small></button>
     </div>
-    <select id="tType" class="hidden"><option value="forward">forward</option><option value="reverse">reverse</option></select>
-    <div class="row">
-      <label class="grow">پروتکل
-        <select id="tProtocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></label>
-      <label class="grow">سرور مبدا (ورودی) *<select id="tSource" required></select></label>
+    <label class="lbl">ترنسپورت لینک بین دو سرور</label>
+    <div class="trans-grid" id="wTransGrid">
+      <button type="button" class="trans-card active" data-tr="auto" onclick="wizSetTrans('auto')"><b>Auto</b><small>خودکار؛ همه مسیرها، هرکدام شد</small></button>
+      <button type="button" class="trans-card" data-tr="tcpmux" onclick="wizSetTrans('tcpmux')"><b>TCPMux</b><small>سریع؛ استریم روی کانکشن آماده</small></button>
+      <button type="button" class="trans-card" data-tr="tcp" onclick="wizSetTrans('tcp')"><b>TCP</b><small>ساده و پایدار</small></button>
+      <button type="button" class="trans-card" data-tr="ws" onclick="wizSetTrans('ws')"><b>WebSocket</b><small>عبور از پروکسی/CDN</small></button>
+      <button type="button" class="trans-card" data-tr="wss" onclick="wizSetTrans('wss')"><b>WSS</b><small>وب‌سوکت امن (TLS)</small></button>
     </div>
-    <label id="destWrap"><span id="destLabel">سرور خروجی (Exit)</span><select id="tDest"></select>
-      <small class="muted" id="destHint"></small></label>
-    <label id="transportWrap">ترنسپورت لینک بین دو سرور
-      <select id="tTransport" onchange="syncRoute()">
-        <option value="tcp">TCP — ساده و پایدار (کانکشن جدا برای هر کاربر)</option>
-        <option value="tcpmux">TCPMux — سریع‌تر (چند استریم روی کانکشن‌های آماده)</option>
-        <option value="ws">WebSocket — عبور از پروکسی/CDN</option>
-        <option value="wss">WSS — وب‌سوکت امن (TLS)</option>
-        <option value="auto">Auto — خودکار (TCP + Mux + WS + WSS)</option>
-      </select>
-      <small class="muted" id="transportHint"></small></label>
-    <div id="linkTestBox" class="linktest hidden">
+    <label class="lbl">پروفایل</label>
+    <div class="seg" id="wProfileSeg">
+      <button type="button" class="seg-btn active" data-prof="balanced" onclick="wizSetProfile('balanced')"><b>⚖️ متعادل</b><small>برای بیشتر کارها</small></button>
+      <button type="button" class="seg-btn" data-prof="gaming" onclick="wizSetProfile('gaming')"><b>🎮 گیمینگ</b><small>تأخیر کم، کانکشن بیشتر</small></button>
+      <button type="button" class="seg-btn" data-prof="ultraspeed" onclick="wizSetProfile('ultraspeed')"><b>🚀 حداکثر سرعت</b><small>بیشترین کانکشن آماده</small></button>
+    </div>
+    <div class="linktest">
       <button type="button" class="btn ghost" id="linkTestBtn" onclick="runLinkTest()">🔌 تست اتصال بین دو سرور</button>
       <div id="linkTestResult"></div>
     </div>
-    <div class="route-preview"><span id="rpFrom">سرور مبدا</span><i>→ پورت <b id="rpListen">؟</b> →</i><span id="rpTo">مقصد</span></div>
+  </div>
+
+  <!-- گام ۳: آدرس -->
+  <div class="wiz-pane hidden" data-pane="3">
+    <p class="muted">کاربرها با این آدرس به تونل وصل می‌شوند:</p>
+    <div class="addr-box"><b class="ltr" id="wAddrPreview">—</b>
+      <button type="button" class="icon-btn" title="کپی" onclick="copyText(document.getElementById('wAddrPreview').textContent,'آدرس کپی شد ✅')">📋</button></div>
+    <div class="kv-rows">
+      <div><span>سرور ورودی</span><b id="wAddrEntry">—</b></div>
+      <div><span>آدرس عمومی ورودی</span><b class="ltr" id="wAddrHost">—</b></div>
+      <div><span>جهت / ترنسپورت</span><b id="wAddrMode">—</b></div>
+    </div>
+    <p class="muted small">پورت اتصال کاربر در گام بعد مشخص می‌شود؛ اگر خالی بگذاری خودش یک پورت آزاد از ۳۰۸۰ به بالا انتخاب می‌کند.</p>
+  </div>
+
+  <!-- گام ۴: پورت‌ها -->
+  <div class="wiz-pane hidden" data-pane="4">
     <div class="row">
-      <label class="grow">پورت ورودی *<input id="tListen" type="number" min="1" max="65535" required placeholder="2222" oninput="syncRoute()"></label>
-      <label class="grow" id="targetHostWrap"><span id="targetHostLabel">هاست مقصد</span><input id="tTargetHost" class="ltr" value="127.0.0.1" oninput="syncRoute()"></label>
-      <label class="grow">پورت مقصد *<input id="tTargetPort" type="number" min="1" max="65535" required placeholder="22" oninput="syncRoute()"></label>
+      <label class="grow">پروتکل
+        <select id="wProtocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></label>
+      <label class="grow" id="targetHostWrap"><span id="targetHostLabel">هاست سرویس</span><input id="tTargetHost" class="ltr" value="127.0.0.1"></label>
     </div>
     <div id="customHostRow" class="hidden"><a class="mini-link" href="#" onclick="toggleCustomHost(event)">سرویس روی دستگاه دیگری پشت سرور خروجی است؟ (هاست سفارشی)</a></div>
+    <label>پورت‌هایی که روی ورودی باز می‌شود
+      <input id="wPorts" class="ltr" placeholder="443, 8080-8090, 2053=53" oninput="renderPortsPreview()">
+      <small class="muted">با کاما جدا کن؛ بازه با خط تیره و نگاشت با مساوی: <span class="ltr">2053=53</span> یعنی پورت ۲۰۵۳ ورودی می‌رسد به پورت ۵۳ سرویس روی خروجی. خالی = پورت خودکار.</small>
+    </label>
+    <div id="wPortsPreview" class="ports-preview"></div>
     <div class="row">
       <label class="grow">سقف ترافیک (GB) — خالی = نامحدود<input id="tLimit" type="number" step="0.1" min="0" placeholder="نامحدود"></label>
       <label class="grow">انقضا (اختیاری)<input id="tExpire" type="datetime-local"></label>
     </div>
-    <div class="modal-actions"><button type="button" class="btn ghost" onclick="closeModal('tunnelModal')">انصراف</button><button class="btn primary" type="submit">🚀 ساخت تونل</button></div>
-  </form>
+  </div>
+
+  <!-- گام ۵: ساخت -->
+  <div class="wiz-pane hidden" data-pane="5">
+    <p class="muted">بازبینی نهایی — اگر همه‌چیز درست است بزن «ساخت تونل»:</p>
+    <div class="kv-rows" id="wReview"></div>
+    <p class="muted small">تونل ذخیره می‌شود و هر دو ایجنت در چند ثانیه کانفیگ تازه را می‌گیرند و لینک ساخته می‌شود.</p>
+  </div>
+
+  <p class="wiz-error hidden" id="wizError"></p>
+  <div class="modal-actions wiz-nav">
+    <button type="button" class="btn ghost hidden" id="wizBack" onclick="wizNav(-1)">→ قبلی</button>
+    <span class="grow"></span>
+    <button type="button" class="btn ghost" onclick="closeModal('tunnelModal')">انصراف</button>
+    <button type="button" class="btn primary" id="wizNext" onclick="wizNav(1)">بعدی ←</button>
+    <button type="button" class="btn primary hidden" id="wizBuild" onclick="wizSubmit()">🚀 ساخت تونل</button>
+  </div>
 </div></div>
 
 <!-- ===== مودال محک لینک ===== -->

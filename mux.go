@@ -352,9 +352,14 @@ func (s *muxSession) Close() {
 }
 
 // StartPinger: مالک سشن (سازنده) هر ۸ ثانیه پینگ می‌فرستد تا RTT لینک معلوم باشد
-func (s *muxSession) StartPinger() {
+func (s *muxSession) StartPinger() { s.StartPingerEvery(8 * time.Second) }
+
+func (s *muxSession) StartPingerEvery(every time.Duration) {
+	if every <= 0 {
+		every = 8 * time.Second
+	}
 	go func() {
-		tk := time.NewTicker(8 * time.Second)
+		tk := time.NewTicker(every)
 		defer tk.Stop()
 		for range tk.C {
 			if s.closed.Load() {

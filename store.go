@@ -72,6 +72,12 @@ type TransReport struct {
 	OnDemand bool   `json:"ondemand"`
 }
 
+// PortMap یک نگاشت پورت: روی ورودی Listen باز می‌شود و به پورت Target روی خروجی می‌رسد
+type PortMap struct {
+	Listen int `json:"listen"`
+	Target int `json:"target"`
+}
+
 type Tunnel struct {
 	ID                int    `json:"id"`
 	Name              string `json:"name"`
@@ -83,6 +89,8 @@ type Tunnel struct {
 	TargetHost        string `json:"target_host"`
 	TargetPort        int    `json:"target_port"`
 	Transport         string `json:"transport"`
+	Profile           string    `json:"profile"`
+	Ports             []PortMap `json:"ports"`
 	Token             string `json:"token"`
 	Enabled           bool   `json:"enabled"`
 	BytesIn           int64  `json:"bytes_in"`
