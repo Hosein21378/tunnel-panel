@@ -48,6 +48,7 @@ func (a *agentStats) drain() []map[string]any {
 }
 
 var stats = newAgentStats()
+var lastSelfUpdateTry time.Time
 
 func copyCount(dst net.Conn, src net.Conn, counter *atomic.Int64) {
 	buf := make([]byte, 65536)
@@ -90,6 +91,7 @@ type agentConfig struct {
 	Listen         []listenCfg `json:"listen"`
 	ReverseConnect []revCfg    `json:"reverse_connect"`
 	RelayPort      int         `json:"relay_port"`
+	SelfUpdate     bool        `json:"self_update"`
 }
 
 // ---------- Reverse: هاب سمت سرور عمومی ----------
@@ -488,6 +490,17 @@ func runAgent(panelURL, token string, relayPort, pollSec int) error {
 		} else {
 			var cfg agentConfig
 			if json.Unmarshal(raw, &cfg) == nil {
+				// آپدیت خودکار ایجنت از خود پنل (اگر نسخه پنل تازه‌تر باشد)
+				if cfg.SelfUpdate && time.Since(lastSelfUpdateTry) > 10*time.Minute {
+					lastSelfUpdateTry = time.Now()
+					fmt.Println("[update] panel has a newer version; updating agent...")
+					if nv, err := performSelfUpdate([]string{client.base + "/tpanel"}); err == nil {
+						fmt.Printf("[update] agent updated to %s; restarting...\n", nv)
+						go func() { time.Sleep(500 * time.Millisecond); reExec() }()
+					} else {
+						fmt.Println("[update] agent self-update failed:", err)
+					}
+				}
 				if cfg.RelayPort == 0 {
 					cfg.RelayPort = relayPort
 				}

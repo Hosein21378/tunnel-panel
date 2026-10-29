@@ -680,6 +680,68 @@ func runPanel(host string, port int, dataPath string) error {
 			"connections": conns, "chart": chart})
 	})
 
+	// ---------- سیستم و آپدیت از داخل پنل ----------
+	mux.HandleFunc("/api/system/check", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := p.authUser(w, r)
+		if !ok {
+			return
+		}
+		if u.Role != "admin" {
+			errJSON(w, 403, "فقط ادمین دسترسی دارد")
+			return
+		}
+		out := map[string]any{"current": Version, "latest": "", "update_available": false, "notes": "", "error": ""}
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get(panelVersionManifest)
+		if err != nil {
+			out["error"] = "بررسی آپدیت ممکن نشد (اینترنت سرور پنل؟)"
+			writeJSON(w, 200, out)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			out["error"] = "فایل نسخه روی گیت‌هاب پیدا نشد"
+			writeJSON(w, 200, out)
+			return
+		}
+		var man struct {
+			Version string `json:"version"`
+			Notes   string `json:"notes"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&man); err != nil || man.Version == "" {
+			out["error"] = "فایل نسخه نامعتبر است"
+			writeJSON(w, 200, out)
+			return
+		}
+		out["latest"] = man.Version
+		out["notes"] = man.Notes
+		out["update_available"] = compareVersions(man.Version, Version) > 0
+		writeJSON(w, 200, out)
+	})
+	mux.HandleFunc("/api/system/update", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := p.authUser(w, r)
+		if !ok {
+			return
+		}
+		if u.Role != "admin" || r.Method != http.MethodPost {
+			errJSON(w, 403, "فقط ادمین و با متد POST")
+			return
+		}
+		newVersion, err := performSelfUpdate(panelUpdateURLs())
+		if err != nil {
+			fmt.Println("[update] failed:", err)
+			errJSON(w, 502, "آپدیت ناموفق بود: "+err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "new_version": newVersion,
+			"message": "باینری جدید نصب شد؛ پنل در حال ری‌استارت است..."})
+		// بعد از ارسال پاسخ، با باینری جدید از نو اجرا می‌شویم
+		go func() {
+			time.Sleep(700 * time.Millisecond)
+			reExec()
+		}()
+	})
+
 	// ---------- API ایجنت ----------
 	agentTouch := func(w http.ResponseWriter, r *http.Request) (int, bool) { return p.authNode(w, r) }
 	mux.HandleFunc("/api/agent/register", func(w http.ResponseWriter, r *http.Request) {
@@ -744,7 +806,8 @@ func runPanel(host string, port int, dataPath string) error {
 				}
 			}
 		}
-		writeJSON(w, 200, map[string]any{"listen": listen, "reverse_connect": rev, "relay_port": me.RelayPort})
+		selfUpdate := me.AgentVersion != "" && compareVersions(me.AgentVersion, Version) < 0
+		writeJSON(w, 200, map[string]any{"listen": listen, "reverse_connect": rev, "relay_port": me.RelayPort, "self_update": selfUpdate})
 	})
 	mux.HandleFunc("/api/agent/heartbeat", func(w http.ResponseWriter, r *http.Request) {
 		id, ok := agentTouch(w, r)
