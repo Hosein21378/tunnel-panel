@@ -287,3 +287,9 @@ ul.nice{color:#c6d5e4;line-height:2.1;font-size:14px;padding-right:19px}
 .palette-results .mini-row{cursor:pointer;margin-bottom:6px}
 .palette-results .mini-row:hover{border-color:var(--aqua)}
 .palette p{padding:0 16px 12px;margin:0}
+
+/* ===== v2.3: آپدیت سیستم ===== */
+.update-hero{display:flex;gap:16px;align-items:center}
+.update-badge{font-size:36px;background:rgba(45,212,191,.12);border:1px solid rgba(45,212,191,.3);width:66px;height:66px;border-radius:19px;display:flex;align-items:center;justify-content:center;flex:none}
+.help-p{color:#c6d5e4;line-height:2;font-size:14px}
+:root[data-theme="dawn"] .help-p{color:#5c4a33}

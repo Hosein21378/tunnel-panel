@@ -51,6 +51,7 @@
       <button data-tab="nodes" class="navbtn"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>سرورها</button>
       <button data-tab="tunnels" class="navbtn"><svg viewBox="0 0 24 24"><path d="M4 7h11a4 4 0 0 1 0 8H9"/><path d="M9 11l-4 4 4 4"/><path d="M15 3l4 4-4 4" transform="translate(0,2)"/></svg>تونل‌ها</button>
       <button data-tab="users" class="navbtn admin-only"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c1-3.5 3.8-5 6.5-5s5.5 1.5 6.5 5"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M17.5 15.3c2 .6 3.4 2 4 4.7"/></svg>کاربران</button>
+      <button data-tab="update" class="navbtn admin-only"><svg viewBox="0 0 24 24"><path d="M12 3v10"/><path d="M7 8l5 5 5-5"/><path d="M4 21h16"/></svg>آپدیت سیستم</button>
       <button data-tab="help" class="navbtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.3A2.6 2.6 0 1 1 12 12.5V14"/><path d="M12 17.5h.01"/></svg>راهنما</button>
     </nav>
     <div class="side-foot">
@@ -140,6 +141,33 @@
         <thead><tr><th>کاربر</th><th>نقش</th><th>وضعیت</th><th>عملیات</th></tr></thead>
         <tbody id="usersBody"></tbody>
       </table></div>
+    </section>
+
+    <!-- آپدیت سیستم -->
+    <section id="tab-update" class="tab">
+      <div class="card update-hero">
+        <div class="update-badge">🚀</div>
+        <div class="grow">
+          <h3>نسخه فعلی پنل: <b class="ltr" id="curVersion">—</b></h3>
+          <p class="muted" id="updStatus">برای دیدن نسخه تازه، «بررسی آپدیت» را بزن.</p>
+          <p class="muted small" id="updNotes"></p>
+        </div>
+      </div>
+      <div class="card">
+        <h3>آپدیت پنل</h3>
+        <p class="help-p">با یک کلیک، باینری تازه از گیت‌هاب دانلود، بررسی و جایگزین می‌شود و پنل خودش ری‌استارت می‌کند. <b>سرورها، تونل‌ها، کاربران و آمار پاک نمی‌شوند.</b> ایجنت‌های قدیمی‌تر هم بعد از آپدیت پنل، خودکار از خود پنل آپدیت می‌شوند و نیازی نیست روی تک‌تک سرورها کاری بکنی.</p>
+        <div class="row">
+          <button class="btn" id="checkUpdBtn" onclick="checkUpdate(true)">🔎 بررسی آپدیت</button>
+          <button class="btn primary" id="doUpdBtn" onclick="doUpdate()">⬇️ آپدیت پنل به نسخه تازه</button>
+          <button class="btn ghost" onclick="doUpdate(true)">نصب مجدد همین نسخه</button>
+        </div>
+        <p class="muted small" id="updHint"></p>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>ایجنت‌های سرورها</h3><button class="btn sm" onclick="loadAgentVersions()">↻ تازه‌سازی</button></div>
+        <div id="agentVersions" class="mini-list"></div>
+        <p class="muted small">ایجنت‌ها وقتی نسخه پنل از نسخه آن‌ها تازه‌تر باشد، ظرف یک دقیقه خودکار آپدیت می‌شوند. اگر ایجنتی آفلاین باشد، با اولین اتصالش آپدیت را می‌گیرد.</p>
+      </div>
     </section>
 
     <!-- راهنما -->

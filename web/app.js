@@ -12,7 +12,7 @@ let lastChart = [];
 let token = localStorage.getItem('tp_token') || '';
 let myRole = '';
 let nodesCache = [], tunnelsCache = [];
-const TITLES = {dashboard:['داشبورد','نمای کلی سرورها و تونل‌ها'],nodes:['سرورها','سرورهای متصل به پنل و وضعیت آن‌ها'],tunnels:['تونل‌ها','تونل‌های بین سرورها؛ زنده، سریع، امن'],users:['کاربران','مدیریت دسترسی به پنل'],help:['راهنما','هر چیزی برای شروع لازم داری']};
+const TITLES = {dashboard:['داشبورد','نمای کلی سرورها و تونل‌ها'],nodes:['سرورها','سرورهای متصل به پنل و وضعیت آن‌ها'],tunnels:['تونل‌ها','تونل‌های بین سرورها؛ زنده، سریع، امن'],users:['کاربران','مدیریت دسترسی به پنل'],help:['راهنما','هر چیزی برای شروع لازم داری'],update:['آپدیت سیستم','به‌روز نگه داشتن پنل و ایجنت‌ها']};
 
 function fmtBytes(b){ if(!b) return '0 B'; const u=['B','KB','MB','GB','TB']; const i=Math.min(u.length-1,Math.floor(Math.log(b)/Math.log(1024))); return (b/Math.pow(1024,i)).toFixed(i?1:0)+' '+u[i]; }
 function esc(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -84,6 +84,7 @@ async function refreshAll(manual){
     if(active==='tab-nodes') await loadNodes();
     if(active==='tab-tunnels'){ await loadNodes(false); await loadTunnels(); }
     if(active==='tab-users' && myRole==='admin') await loadUsers();
+    if(active==='tab-update' && myRole==='admin'){ await loadNodes(false); loadAgentVersions(); const h = await (await fetch('/health')).json().catch(()=>({})); if(h.version) $('#curVersion').textContent = 'v'+h.version; }
     if(manual) toast('تازه‌سازی شد ↻');
   }catch(e){ console.warn(e); }
 }
@@ -381,3 +382,56 @@ function renderPalette(){
 document.addEventListener('keydown', e=>{
   if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); if(token) openPalette(); }
 });
+
+
+/* ---------- آپدیت سیستم ---------- */
+let latestVersion = '';
+async function checkUpdate(manual){
+  const st = $('#updStatus'), btn = $('#checkUpdBtn');
+  try{
+    if(btn){ btn.disabled = true; btn.textContent = 'در حال بررسی...'; }
+    st.textContent = 'در حال بررسی نسخه تازه از گیت‌هاب...';
+    const d = await api('GET','/api/system/check');
+    $('#curVersion').textContent = 'v'+d.current;
+    latestVersion = d.latest || '';
+    if(d.error){ st.textContent = '⚠️ ' + d.error; if(manual) toast(d.error, true); }
+    else if(d.update_available){ st.innerHTML = '🎉 نسخه تازه <b class="ltr">v'+esc(d.latest)+'</b> آماده است!'; $('#updNotes').textContent = d.notes||''; toast('نسخه تازه پیدا شد 🎉'); }
+    else { st.textContent = '✅ پنل به‌روز است (آخرین نسخه: v'+d.current+')'; $('#updNotes').textContent = d.notes||''; }
+  }catch(e){ st.textContent = '⚠️ بررسی آپدیت ناموفق بود'; if(manual) toast(e.message, true); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent='🔎 بررسی آپدیت'; } }
+}
+async function doUpdate(forceSame){
+  if(!forceSame && !latestVersion){ await checkUpdate(false); if(!latestVersion){ toast('اول بررسی آپدیت را بزن', true); return; } }
+  if(!confirm(forceSame ? 'باینری همین نسخه دوباره دانلود و پنل ری‌استارت شود؟' : 'پنل به نسخه v'+latestVersion+' آپدیت و ری‌استارت شود؟ (تونل‌ها چند ثانیه قطع می‌شوند)')) return;
+  const btn = $('#doUpdBtn');
+  try{
+    btn.disabled = true; btn.textContent = 'در حال دانلود و نصب...';
+    $('#updHint').textContent = 'چند ثانیه صبر کن؛ صفحه به صورت خودکار بعد از آپدیت تازه می‌شود...';
+    const d = await api('POST','/api/system/update');
+    toast('نصب نسخه '+(d.new_version||'')+' انجام شد؛ در حال ری‌استارت...');
+    const target = d.new_version || latestVersion;
+    for(let i=0;i<40;i++){
+      await new Promise(r=>setTimeout(r,2000));
+      try{
+        const h = await (await fetch('/health')).json();
+        if(h.version && (!target || h.version===target)){ toast('آپدیت کامل شد 🎉 نسخه '+h.version); setTimeout(()=>location.reload(), 900); return; }
+      }catch(_){}
+    }
+    toast('پنل دیر بالا آمد؛ صفحه را دستی رفرش کن', true);
+  }catch(e){ toast(e.message, true); }
+  finally{ btn.disabled=false; btn.textContent='⬇️ آپدیت پنل به نسخه تازه'; }
+}
+function loadAgentVersions(){
+  const box = $('#agentVersions'); if(!box) return;
+  box.innerHTML = nodesCache.map(n=>{
+    const v = n.agent_version||'';
+    const old = v && latestKnownPanel && compareVersionClient(v, latestKnownPanel) < 0;
+    return `<div class="mini-row"><i class="dot ${n.online?'on':'off'}"></i><div class="grow"><b>${esc(n.name)}</b><small>نسخه ایجنت: <span class="ltr">${esc(v||'—')}</span></small></div><span class="badge ${!v?'off':old?'warn':'on'}" style="${old?'background:rgba(251,191,36,.14);color:var(--sand)':''}">${!v?'نامشخص':old?'آپدیت خودکار به زودی':'به‌روز'}</span></div>`;
+  }).join('') || '<div class="empty-mini">هنوز سروری نیست</div>';
+}
+let latestKnownPanel = '';
+fetch('/health').then(r=>r.json()).then(h=>{ latestKnownPanel = h.version||''; }).catch(()=>{});
+function compareVersionClient(a,b){
+  const pa=a.replace(/^v/,'').split('.').map(Number), pb=b.replace(/^v/,'').split('.').map(Number);
+  for(let i=0;i<3;i++){ const d=(pa[i]||0)-(pb[i]||0); if(d) return d; } return 0;
+}
