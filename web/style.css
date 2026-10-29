@@ -293,3 +293,12 @@ ul.nice{color:#c6d5e4;line-height:2.1;font-size:14px;padding-right:19px}
 .update-badge{font-size:36px;background:rgba(45,212,191,.12);border:1px solid rgba(45,212,191,.3);width:66px;height:66px;border-radius:19px;display:flex;align-items:center;justify-content:center;flex:none}
 .help-p{color:#c6d5e4;line-height:2;font-size:14px}
 :root[data-theme="dawn"] .help-p{color:#5c4a33}
+
+/* ===== v2.4: منابع سرور و روش‌های اتصال ===== */
+.res-row{display:flex;align-items:center;gap:9px;font-size:11.5px}
+.res-row>span{color:var(--muted);width:34px;flex:none}
+.res-row>b{font-weight:500;font-size:11px}
+.res-track{flex:1;height:7px;border-radius:7px;background:rgba(120,160,200,.16);overflow:hidden}
+.res-track i{display:block;height:100%;border-radius:7px;transition:width .5s ease}
+.method-title{font-size:12.5px;font-weight:700;margin:12px 0 4px;color:var(--teal)}
+:root[data-theme="dawn"] .method-title{color:#0f766e}

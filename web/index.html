@@ -204,9 +204,16 @@
     <label>آدرس عمومی (IP یا دامنه)<input id="nodeHost" class="ltr" placeholder="203.0.113.10"></label>
     <label>توضیح (اختیاری)<input id="nodeDesc" placeholder="مثلاً: سرور اصلی فروشگاه"></label>
     <div id="installBox" class="install-box hidden">
-      <b>✨ حالا این دستور را روی آن سرور اجرا کن:</b>
+      <b>✨ سرور را با یکی از این روش‌ها وصل کن:</b>
+      <label style="margin-top:10px">آدرس عمومی پنل (اگر با دامنه یا IP دیگری بازش می‌کنی، همان را بنویس)
+        <input id="panelAddr" class="ltr" oninput="refreshInstall()"></label>
+      <p class="method-title">روش ۱ — دستور کامل (پیشنهاد)</p>
       <div class="cmd-row"><code id="installCmd" class="cmd"></code><button type="button" class="btn primary sm" onclick="copyInstall()">📋 کپی</button></div>
-      <p class="muted small">چند ثانیه بعد سرور آنلاین می‌شود. این دستور حاوی توکن اختصاصی سرور است — مثل رمز نگهش دار.</p>
+      <p class="method-title">روش ۲ — کد اتصال (مثل کاریز)؛ روی سرور منیجر را باز کن و فقط کد را بده:</p>
+      <div class="cmd-row"><code id="joinCodeBox" class="cmd"></code><button type="button" class="btn sm" onclick="copyJoin()">📋 کپی کد</button></div>
+      <p class="muted small ltr" style="text-align:left">bash &lt;(curl -fsSL PANEL/manager.sh) agent --code CODE</p>
+      <p class="method-title">روش ۳ — دستی: روی سرور فقط <code class="ltr">tpanel-manager</code> را بزن و گزینه ۲ (اتصال ایجنت) را انتخاب کن؛ آدرس پنل و توکن را همان‌جا می‌دهی.</p>
+      <p class="muted small">چند ثانیه بعد سرور آنلاین می‌شود. دستور و کد حاوی توکن اختصاصی سرور است — مثل رمز نگهشان دار.</p>
     </div>
     <div class="modal-actions"><button type="button" class="btn ghost" onclick="closeModal('nodeModal')">بستن</button><button class="btn primary" type="submit">💾 ذخیره</button></div>
   </form>

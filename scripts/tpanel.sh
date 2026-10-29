@@ -9,6 +9,7 @@
 #   tpanel-manager panel password       reset admin password
 #   tpanel-manager panel logs|status|restart|uninstall
 #   tpanel-manager agent --panel http://PANEL:8080 --token TOKEN [--relay-port 10000]
+#   tpanel-manager agent --code tp1_...        (join code from the panel, Kariz-style)
 #   tpanel-manager agent logs|status|restart|uninstall
 #   tpanel-manager status
 #
@@ -234,17 +235,46 @@ panel_uninstall() {
 }
 
 # ---------- ایجنت ----------
+decode_join_code() { # tp1_<base64url(panel|token|relay)> -> سه متغیر سراسری
+  local code=${1#tp1_} pad decoded
+  code=$(printf '%s' "$code" | tr '_-' '/+')
+  pad=$(( (4 - ${#code} % 4) % 4 )); code="${code}$(printf '=%.0s' $(seq 1 $pad 2>/dev/null) 2>/dev/null)"
+  decoded=$(printf '%s' "$code" | base64 -d 2>/dev/null) || return 1
+  IFS='|' read -r JOIN_PANEL JOIN_TOKEN JOIN_RELAY <<< "$decoded"
+  [[ -n "$JOIN_PANEL" && -n "$JOIN_TOKEN" ]]
+}
+
 agent_install() {
-  local panel="" token="" relay=10000
+  local panel="" token="" relay=10000 code=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --panel) panel=$2; shift 2;;
       --token) token=$2; shift 2;;
+      --code) code=$2; shift 2;;
       --relay-port) relay=$2; shift 2;;
       *) shift;;
     esac
   done
   need_root "$@"
+  if [[ -n "$code" ]]; then
+    if decode_join_code "$code"; then
+      panel=$JOIN_PANEL; token=$JOIN_TOKEN; [[ "$JOIN_RELAY" =~ ^[0-9]+$ ]] && relay=$JOIN_RELAY
+      info "Join code accepted for panel: $panel"
+    else
+      die "Invalid join code."
+    fi
+  fi
+  if [[ -z "$panel" && -z "$token" ]]; then
+    local jc=""
+    read -r -p "  Join code (tp1_...) - or just Enter for manual setup: " jc </dev/tty || true
+    if [[ -n "$jc" ]]; then
+      if decode_join_code "$jc"; then
+        panel=$JOIN_PANEL; token=$JOIN_TOKEN; [[ "$JOIN_RELAY" =~ ^[0-9]+$ ]] && relay=$JOIN_RELAY
+      else
+        die "Invalid join code."
+      fi
+    fi
+  fi
   if [[ -z "$panel" ]]; then read -r -p "  Panel URL (e.g. http://1.2.3.4:8080): " panel </dev/tty; fi
   if [[ -z "$token" ]]; then read -r -p "  Node token (from panel > Servers > Add server): " token </dev/tty; fi
   [[ -n "$panel" && -n "$token" ]] || die "Panel URL and token are required."

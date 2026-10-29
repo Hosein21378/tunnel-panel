@@ -145,6 +145,7 @@ function renderNodes(){
       <div><h4>${esc(n.name)}</h4><small>${esc(n.description||'بدون توضیح')}</small></div>
       <span class="status-pill ${n.online?'on':'off'}"><i class="dot ${n.online?'on':'off'}"></i>${n.online?'آنلاین':'آفلاین'}</span></div>
     <div class="kv-rows">
+      ${resBars(n)}
       <div><span>آدرس عمومی</span><b class="ltr copyable" title="کلیک برای کپی" onclick="copyText('${esc(n.host||'')}','آدرس کپی شد ✅')">${esc(n.host||'—')}</b></div>
       <div><span>IP گزارش‌شده</span><b class="ltr">${esc(n.reported_ip||'—')}</b></div>
       <div><span>ایجنت / سیستم</span><b>${esc(n.agent_version||'—')} · ${esc(n.os_info||'')}</b></div>
@@ -165,13 +166,14 @@ function openNodeModal(id){
     const n = nodesCache.find(x=>x.id===id); if(!n) return;
     $('#nodeModalTitle').textContent = n.name;
     $('#nodeId').value=n.id; $('#nodeName').value=n.name; $('#nodeHost').value=n.host||''; $('#nodeDesc').value=n.description||'';
-    showInstall(n.token);
+    showInstall(n.token, n.relay_port);
   }
   $('#nodeModal').classList.remove('hidden');
 }
-function showInstall(tok){
-  const url = location.origin;
-  $('#installCmd').textContent = `bash <(curl -fsSL ${url}/manager.sh) agent --panel ${url} --token ${tok}`;
+function showInstall(tok, relay){
+  installTokenVal = tok; installRelayVal = relay || 10000;
+  $('#panelAddr').value = location.origin;
+  refreshInstall();
   $('#installBox').classList.remove('hidden');
 }
 function copyInstall(){ copyText($('#installCmd').textContent, 'دستور نصب کپی شد ✅ حالا روی سرور اجراش کن'); }
@@ -184,7 +186,7 @@ $('#nodeForm').addEventListener('submit', async e=>{
     else{
       const n = await api('POST','/api/nodes', body);
       $('#nodeId').value = n.id; $('#nodeModalTitle').textContent='🎉 سرور ساخته شد';
-      showInstall(n.token); toast('سرور ساخته شد — دستور نصب را روی سرور اجرا کن');
+      showInstall(n.token, n.relay_port); toast('سرور ساخته شد — دستور نصب را روی سرور اجرا کن');
     }
     loadNodes();
   }catch(err){ toast(err.message, true); }
@@ -435,3 +437,36 @@ function compareVersionClient(a,b){
   const pa=a.replace(/^v/,'').split('.').map(Number), pb=b.replace(/^v/,'').split('.').map(Number);
   for(let i=0;i<3;i++){ const d=(pa[i]||0)-(pb[i]||0); if(d) return d; } return 0;
 }
+
+
+/* ---------- منابع سرور (CPU/RAM/Disk) ---------- */
+function resBar(label, pct, text){
+  const p = Math.max(0, Math.min(100, pct||0));
+  const col = p>=85 ? 'var(--red)' : p>=65 ? 'var(--sand)' : 'var(--teal)';
+  return `<div class="res-row"><span>${label}</span><div class="res-track"><i style="width:${p}%;background:${col}"></i></div><b class="ltr">${text}</b></div>`;
+}
+function fmtUptime(sec){
+  if(!sec) return '';
+  const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600);
+  return d? d+' روز و '+h+' ساعت' : h+' ساعت';
+}
+function resBars(n){
+  const r = n.resources||{};
+  if(!n.online || !r.mem_total) return '<div class="res-row"><span>منابع</span><b class="muted">در انتظار گزارش ایجنت...</b></div>';
+  return resBar('CPU', r.cpu_percent, (r.cpu_percent||0).toFixed(0)+'% · '+(r.num_cpu||'?')+' هسته')
+       + resBar('RAM', r.mem_percent, fmtBytes(r.mem_used)+' / '+fmtBytes(r.mem_total))
+       + resBar('Disk', r.disk_percent, fmtBytes(r.disk_used)+' / '+fmtBytes(r.disk_total))
+       + (r.uptime_seconds? `<div><span>آپتایم</span><b>${fmtUptime(r.uptime_seconds)}</b></div>`:'');
+}
+
+/* ---------- روش‌های اتصال سرور ---------- */
+let installTokenVal = '', installRelayVal = 10000;
+function b64url(str){
+  return btoa(unescape(encodeURIComponent(str))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function refreshInstall(){
+  const panel = ($('#panelAddr').value||location.origin).replace(/\/$/,'');
+  $('#installCmd').textContent = `bash <(curl -fsSL ${panel}/manager.sh) agent --panel ${panel} --token ${installTokenVal}`;
+  $('#joinCodeBox').textContent = 'tp1_' + b64url(`${panel}|${installTokenVal}|${installRelayVal}`);
+}
+function copyJoin(){ copyText($('#joinCodeBox').textContent, 'کد اتصال کپی شد ✅ روی سرور با agent --code استفاده‌اش کن'); }
