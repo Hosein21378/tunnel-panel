@@ -78,6 +78,8 @@ document.querySelectorAll('.navbtn').forEach(b=> b.addEventListener('click', ()=
 
 async function refreshAll(manual){
   if(!token) return;
+  // اگر فرمی باز است (ساخت/ویرایش تونل یا سرور)، تازه‌سازی خودکار صبر کند
+  if(!manual && document.querySelector('.modal:not(.hidden)')) return;
   const active = document.querySelector('.tab.active')?.id || '';
   try{
     if(active==='tab-dashboard'){ await loadNodes(false); await loadTunnels(false); await loadDashboard(); }
@@ -132,7 +134,12 @@ function roundBar(ctx,x,y,w,h){ const r=Math.min(3,w/2,h); ctx.beginPath(); ctx.
 async function loadNodes(render=true){
   nodesCache = await api('GET','/api/nodes');
   const opts = nodesCache.map(n=>`<option value="${n.id}">${esc(n.name)}${n.online?' · آنلاین':''}</option>`).join('');
-  $('#tSource').innerHTML = opts; $('#tDest').innerHTML = opts;
+  // انتخاب فعلی کاربر در فرم تونل حفظ شود (باگ برگشتن به اولین سرور)
+  const srcEl = $('#tSource'), dstEl = $('#tDest');
+  const prevSrc = srcEl.value, prevDst = dstEl.value;
+  srcEl.innerHTML = opts; dstEl.innerHTML = opts;
+  if(prevSrc && [...srcEl.options].some(o=>o.value===prevSrc)) srcEl.value = prevSrc;
+  if(prevDst && [...dstEl.options].some(o=>o.value===prevDst)) dstEl.value = prevDst;
   if(render) renderNodes();
 }
 function renderNodes(){

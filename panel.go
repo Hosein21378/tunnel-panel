@@ -71,10 +71,21 @@ func (p *panelServer) nodeOut(n Node) map[string]any {
 	if host == "" {
 		host = n.ReportedIP
 	}
+	memPct, diskPct := 0.0, 0.0
+	if n.MemTotalBytes > 0 {
+		memPct = float64(n.MemUsedBytes) / float64(n.MemTotalBytes) * 100
+	}
+	if n.DiskTotalBytes > 0 {
+		diskPct = float64(n.DiskUsedBytes) / float64(n.DiskTotalBytes) * 100
+	}
 	return map[string]any{"id": n.ID, "name": n.Name, "host": host, "reported_ip": n.ReportedIP,
 		"token": n.Token, "description": n.Description, "agent_version": n.AgentVersion,
 		"os_info": n.OSInfo, "relay_port": n.RelayPort, "online": online,
-		"last_seen": nilOrStr(n.LastSeen), "created_at": n.CreatedAt}
+		"last_seen": nilOrStr(n.LastSeen), "created_at": n.CreatedAt,
+		"resources": map[string]any{"cpu_percent": n.CPUPercent, "mem_used": n.MemUsedBytes,
+			"mem_total": n.MemTotalBytes, "mem_percent": memPct, "disk_used": n.DiskUsedBytes,
+			"disk_total": n.DiskTotalBytes, "disk_percent": diskPct, "load1": n.Load1,
+			"uptime_seconds": n.UptimeSeconds, "num_cpu": n.NumCPU}}
 }
 
 func nilOrStr(s string) any {
@@ -377,6 +388,7 @@ func runPanel(host string, port int, dataPath string) error {
 			out := p.nodeOut(n)
 			base := "http://" + r.Host
 			out["install_command"] = fmt.Sprintf("bash <(curl -fsSL %s/manager.sh) agent --panel %s --token %s", base, base, n.Token)
+			out["join_code"] = makeJoinCode(base, n.Token, n.RelayPort)
 			writeJSON(w, 200, out)
 		default:
 			errJSON(w, 405, "method not allowed")
@@ -815,11 +827,19 @@ func runPanel(host string, port int, dataPath string) error {
 			return
 		}
 		var in struct {
-			IP        string `json:"ip"`
-			Version   string `json:"version"`
-			OSInfo    string `json:"os_info"`
-			RelayPort int    `json:"relay_port"`
-			Stats     []struct {
+			IP             string  `json:"ip"`
+			Version        string  `json:"version"`
+			OSInfo         string  `json:"os_info"`
+			RelayPort      int     `json:"relay_port"`
+			CPUPercent     float64 `json:"cpu_percent"`
+			MemUsedBytes   int64   `json:"mem_used_bytes"`
+			MemTotalBytes  int64   `json:"mem_total_bytes"`
+			DiskUsedBytes  int64   `json:"disk_used_bytes"`
+			DiskTotalBytes int64   `json:"disk_total_bytes"`
+			Load1          float64 `json:"load1"`
+			UptimeSeconds  int64   `json:"uptime_seconds"`
+			NumCPU         int     `json:"num_cpu"`
+			Stats          []struct {
 				TunnelID    int   `json:"tunnel_id"`
 				BytesIn     int64 `json:"bytes_in"`
 				BytesOut    int64 `json:"bytes_out"`
@@ -843,6 +863,14 @@ func runPanel(host string, port int, dataPath string) error {
 				if in.RelayPort > 0 {
 					st.d.Nodes[i].RelayPort = in.RelayPort
 				}
+				st.d.Nodes[i].CPUPercent = in.CPUPercent
+				st.d.Nodes[i].MemUsedBytes = in.MemUsedBytes
+				st.d.Nodes[i].MemTotalBytes = in.MemTotalBytes
+				st.d.Nodes[i].DiskUsedBytes = in.DiskUsedBytes
+				st.d.Nodes[i].DiskTotalBytes = in.DiskTotalBytes
+				st.d.Nodes[i].Load1 = in.Load1
+				st.d.Nodes[i].UptimeSeconds = in.UptimeSeconds
+				st.d.Nodes[i].NumCPU = in.NumCPU
 			}
 		}
 		for _, s := range in.Stats {

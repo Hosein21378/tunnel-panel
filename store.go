@@ -39,6 +39,15 @@ type Node struct {
 	LastSeen     string `json:"last_seen"`
 	CreatedBy    int    `json:"created_by"`
 	CreatedAt    string `json:"created_at"`
+	// منابع لحظه‌ای (گزارش ایجنت)
+	CPUPercent     float64 `json:"cpu_percent"`
+	MemUsedBytes   int64   `json:"mem_used_bytes"`
+	MemTotalBytes  int64   `json:"mem_total_bytes"`
+	DiskUsedBytes  int64   `json:"disk_used_bytes"`
+	DiskTotalBytes int64   `json:"disk_total_bytes"`
+	Load1          float64 `json:"load1"`
+	UptimeSeconds  int64   `json:"uptime_seconds"`
+	NumCPU         int     `json:"num_cpu"`
 }
 
 type Tunnel struct {

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -49,6 +50,100 @@ func (a *agentStats) drain() []map[string]any {
 
 var stats = newAgentStats()
 var lastSelfUpdateTry time.Time
+
+// ---------- منابع سیستم (CPU/RAM/Disk) از /proc ----------
+var cpuPrev struct {
+	sync.Mutex
+	total, idle uint64
+}
+
+func readCPU() (total, idle uint64) {
+	raw, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, 0
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "cpu ") {
+			continue
+		}
+		f := strings.Fields(line)
+		for i, v := range f[1:] {
+			n, _ := strconv.ParseUint(v, 10, 64)
+			total += n
+			if i == 3 || i == 4 { // idle + iowait
+				idle += n
+			}
+		}
+		return total, idle
+	}
+	return 0, 0
+}
+
+func cpuPercent() float64 {
+	total, idle := readCPU()
+	cpuPrev.Lock()
+	defer cpuPrev.Unlock()
+	if cpuPrev.total == 0 || total <= cpuPrev.total {
+		cpuPrev.total, cpuPrev.idle = total, idle
+		return 0
+	}
+	dt := float64(total - cpuPrev.total)
+	di := float64(idle - cpuPrev.idle)
+	cpuPrev.total, cpuPrev.idle = total, idle
+	if dt <= 0 {
+		return 0
+	}
+	pct := (1 - di/dt) * 100
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
+}
+
+func collectResources() map[string]any {
+	out := map[string]any{"cpu_percent": cpuPercent(), "num_cpu": runtime.NumCPU()}
+	if raw, err := os.ReadFile("/proc/meminfo"); err == nil {
+		var total, avail int64
+		for _, line := range strings.Split(string(raw), "\n") {
+			f := strings.Fields(line)
+			if len(f) >= 2 {
+				kb, _ := strconv.ParseInt(f[1], 10, 64)
+				switch f[0] {
+				case "MemTotal:":
+					total = kb * 1024
+				case "MemAvailable:":
+					avail = kb * 1024
+				}
+			}
+		}
+		out["mem_total_bytes"] = total
+		out["mem_used_bytes"] = total - avail
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs("/", &st); err == nil {
+		total := int64(st.Blocks) * int64(st.Bsize)
+		free := int64(st.Bavail) * int64(st.Bsize)
+		out["disk_total_bytes"] = total
+		out["disk_used_bytes"] = total - free
+	}
+	if raw, err := os.ReadFile("/proc/loadavg"); err == nil {
+		f := strings.Fields(string(raw))
+		if len(f) > 0 {
+			out["load1"], _ = strconv.ParseFloat(f[0], 64)
+		}
+	}
+	if raw, err := os.ReadFile("/proc/uptime"); err == nil {
+		f := strings.Fields(string(raw))
+		if len(f) > 0 {
+			sec, _ := strconv.ParseFloat(f[0], 64)
+			out["uptime_seconds"] = int64(sec)
+		}
+	}
+	return out
+}
 
 func copyCount(dst net.Conn, src net.Conn, counter *atomic.Int64) {
 	buf := make([]byte, 65536)
@@ -518,6 +613,9 @@ func runAgent(panelURL, token string, relayPort, pollSec int) error {
 			}
 			hb := map[string]any{"hostname": hostname, "ip": localIP(), "version": Version,
 				"os_info": info["os_info"], "relay_port": relayPort, "stats": stats.drain()}
+			for k, v := range collectResources() {
+				hb[k] = v
+			}
 			if _, err := client.call("POST", "/api/agent/heartbeat", hb); err != nil {
 				fmt.Printf("[!] heartbeat failed: %v\n", err)
 			}

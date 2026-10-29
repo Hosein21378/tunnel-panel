@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -145,3 +146,10 @@ func panelUpdateURLs() []string {
 }
 
 const panelVersionManifest = "https://raw.githubusercontent.com/Hosein21378/tunnel-panel/main/version.json"
+
+// کد اتصال (Join Code) به سبک کاریز: آدرس پنل + توکن + پورت رله، در یک کد کوتاه.
+// فرمت: tp1_<base64url(panel|token|relay)>
+func makeJoinCode(panelBase, token string, relayPort int) string {
+	raw := fmt.Sprintf("%s|%s|%d", panelBase, token, relayPort)
+	return "tp1_" + base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
