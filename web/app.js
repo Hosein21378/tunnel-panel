@@ -237,7 +237,7 @@ function renderTunnels(){
   }).join('') ||
   `<div class="empty-state"><div class="big">🔀</div><b>${q?'تونلی با این اسم پیدا نشد':'هنوز تونلی نساختی'}</b>با دکمه «ساخت تونل» دو سرورت را به هم وصل کن — کمتر از یک دقیقه طول می‌کشد.</div>`;
 }
-const TRANS_FA = {tcp:'TCP', tcpmux:'TCPMux', ws:'WebSocket', wss:'WSS', auto:'Auto', direct:'مستقیم'};
+const TRANS_FA = {tcp:'TCP', tcpmux:'TCPMux', ws:'WebSocket', wss:'WSS', quic:'QUIC', kcp:'KCP', auto:'Auto', direct:'مستقیم'};
 function linkBadge(t){
   const L = t.link || {};
   const act = (L.active_transports||[]).map(x=>TRANS_FA[x]||x).join(' + ');
