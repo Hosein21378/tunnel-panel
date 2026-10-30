@@ -318,11 +318,29 @@ type muxSession struct {
 	closed    atomic.Bool
 	onClose   func(*muxSession)
 	rttMs     atomic.Int64
+	lastSeen  atomic.Int64
+}
+
+// touch آخرین زمان فعالیت نشست را ثبت می‌کند (برای تشخیص نشست مرده)
+func (s *muxSession) touch() { s.lastSeen.Store(time.Now().UnixNano()) }
+
+// Healthy آیا نشست اخیراً فعالیت داشته؟ (نشست مرده را زود تشخیص می‌دهیم)
+func (s *muxSession) Healthy() bool {
+	if s.closed.Load() {
+		return false
+	}
+	ls := s.lastSeen.Load()
+	if ls == 0 {
+		return true
+	}
+	return time.Since(time.Unix(0, ls)) < 25*time.Second
 }
 
 func newMuxSession(tr frameTransport, transport string, tunnelID int, isExit bool,
 	dialLocal func(string, int) (net.Conn, error)) *muxSession {
-	return &muxSession{tr: tr, transport: transport, tunnelID: tunnelID, isExit: isExit, dialLocal: dialLocal}
+	ms := &muxSession{tr: tr, transport: transport, tunnelID: tunnelID, isExit: isExit, dialLocal: dialLocal}
+	ms.touch()
+	return ms
 }
 
 func (s *muxSession) send(f muxFrame) error {
@@ -386,6 +404,7 @@ func (s *muxSession) Run() {
 		if err != nil {
 			continue
 		}
+		s.touch()
 		switch f.Type {
 		case frameOpen:
 			if !s.isExit || s.dialLocal == nil {
@@ -482,11 +501,12 @@ func (s *muxSession) Open(client net.Conn, host string, port int, st *tunStat) e
 		if !ok {
 			return fmt.Errorf("exit refused the connection")
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(6 * time.Second):
 		s.pending.Delete(id)
 		return fmt.Errorf("open stream timeout")
 	}
 	s.streams.Store(id, stream)
+	s.touch()
 	st.conn.Add(1)
 	go s.pumpToFrames(id, client, func(n int) { st.in.Add(int64(n)) })
 	return nil

@@ -363,6 +363,7 @@ type revCfg struct {
 	RelayPort  int    `json:"relay_port"`
 	TargetHost string `json:"target_host"`
 	TargetPort int    `json:"target_port"`
+	Epoch      int64  `json:"-"`
 }
 type acceptCfg struct {
 	ID         int    `json:"id"`
@@ -386,6 +387,7 @@ type agentConfig struct {
 	SelfUpdate     bool        `json:"self_update"`
 	ProbeListen    *probeCfg   `json:"probe_listen"`
 	ProbeDial      *probeCfg   `json:"probe_dial"`
+	Gen            int64       `json:"gen"`
 }
 
 func probeKey(id int) int { return -100000 - id }
@@ -402,6 +404,9 @@ func profilePools(profile string) (tcpWorkers, muxSessions int, ping time.Durati
 }
 
 // نتایج تست اتصال که باید با هارت‌بیت به پنل برود
+var hubEpochMu sync.Mutex
+var hubEpoch = map[int]int64{}
+
 var probeMu sync.Mutex
 var pendingProbeFinal = map[int]bool{}
 var pendingProbes = map[int][]map[string]any{}
@@ -550,6 +555,41 @@ type bufferedConn struct {
 
 func (c *bufferedConn) Read(b []byte) (int, error) { return c.r.Read(b) }
 
+// applyConfig توکن‌ها و هدف‌ها را روی هابِ زنده به‌روز می‌کند (بدون افتادن لیسنرها)
+func (h *relayHub) applyConfig(cfg agentConfig) {
+	h.mu.Lock()
+	h.tokens = map[int]string{}
+	h.directTokens = map[int]string{}
+	h.directTargets = map[int]acceptCfg{}
+	for _, t := range cfg.Listen {
+		if t.Type == "reverse" {
+			h.tokens[t.ID] = t.Token
+		}
+	}
+	for _, a := range cfg.AcceptDirect {
+		h.directTokens[a.ID] = a.Token
+		h.directTargets[a.ID] = a
+	}
+	if cfg.ProbeListen != nil {
+		h.tokens[probeKey(cfg.ProbeListen.ProbeID)] = cfg.ProbeListen.Token
+	}
+	live := map[int]bool{}
+	for id := range h.tokens {
+		live[id] = true
+	}
+	stale := []*muxSession{}
+	for id, list := range h.muxSessions {
+		if !live[id] {
+			stale = append(stale, list...)
+			delete(h.muxSessions, id)
+		}
+	}
+	h.mu.Unlock()
+	for _, s := range stale {
+		s.Close()
+	}
+}
+
 func (h *relayHub) addMuxSession(s *muxSession) {
 	h.mu.Lock()
 	h.muxSessions[s.tunnelID] = append(h.muxSessions[s.tunnelID], s)
@@ -571,18 +611,61 @@ func (h *relayHub) getMuxSession(tid int, want string) *muxSession {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var best *muxSession
-	for _, s := range h.muxSessions[tid] {
-		if s.closed.Load() {
-			continue
+	pick := func(healthyOnly bool) *muxSession {
+		var b *muxSession
+		for _, s := range h.muxSessions[tid] {
+			if s.closed.Load() {
+				continue
+			}
+			if healthyOnly && !s.Healthy() {
+				continue
+			}
+			if want != "" && want != "auto" && s.transport != want {
+				continue
+			}
+			if b == nil || s.StreamsCount() < b.StreamsCount() {
+				b = s
+			}
 		}
-		if want != "" && want != "auto" && s.transport != want {
-			continue
-		}
-		if best == nil || s.StreamsCount() < best.StreamsCount() {
-			best = s
-		}
+		return b
+	}
+	best = pick(true)
+	if best == nil {
+		best = pick(false) // اگر نشست سالمی نماند، به هرچه هست رضایت می‌دهیم
 	}
 	return best
+}
+
+// tryMux روی چند نشست تلاش می‌کند تا یکی واقعاً جواب بدهد
+func (h *relayHub) tryMux(tid int, want string, open func(*muxSession) error) bool {
+	for i := 0; i < 3; i++ {
+		s := h.getMuxSession(tid, want)
+		if s == nil {
+			return false
+		}
+		if err := open(s); err == nil {
+			return true
+		}
+		h.dropSession(tid, s)
+	}
+	return false
+}
+
+// dropSession یک نشست مشکوک را حذف می‌کند تا بعدی امتحان شود
+func (h *relayHub) dropSession(tid int, target *muxSession) {
+	h.mu.Lock()
+	list := h.muxSessions[tid]
+	out := []*muxSession{}
+	for _, s := range list {
+		if s != target {
+			out = append(out, s)
+		}
+	}
+	if len(out) != len(list) {
+		h.muxSessions[tid] = out
+	}
+	h.mu.Unlock()
+	target.Close()
 }
 
 func targetDial(host string, port int) (net.Conn, error) {
@@ -596,6 +679,7 @@ type relayInit struct {
 	TunnelID   int    `json:"tunnel_id"`
 	Token      string `json:"token"`
 	TargetPort int    `json:"target_port"`
+	Epoch      int64  `json:"epoch"`
 }
 func (h *relayHub) pool(id int) chan pooledConn {
 	h.mu.Lock()
@@ -767,6 +851,19 @@ func (h *relayHub) handleRawInit(bc *bufferedConn, reader *bufio.Reader, init re
 			return
 		}
 		_ = bc.SetReadDeadline(time.Time{})
+		if init.Epoch != 0 {
+			hubEpochMu.Lock()
+			if prev, ok := hubEpoch[init.TunnelID]; ok && prev != init.Epoch {
+				hubEpoch[init.TunnelID] = init.Epoch
+				hubEpochMu.Unlock()
+				h.purgeTunnel(init.TunnelID) // دور قبلی مرده؛ استخر را تمیز می‌کنیم
+			} else if !ok {
+				hubEpoch[init.TunnelID] = init.Epoch
+				hubEpochMu.Unlock()
+			} else {
+				hubEpochMu.Unlock()
+			}
+		}
 		if init.TunnelID <= -100000 { // تونل تست اتصال: فقط یک تأیید می‌فرستیم
 			_, _ = bc.Write([]byte{1})
 			time.Sleep(3 * time.Second)
@@ -824,6 +921,19 @@ func (h *relayHub) handleWSInit(ws *wsTransport, init relayInit) {
 			return
 		}
 		_ = ws.conn.SetReadDeadline(time.Time{})
+		if init.Epoch != 0 {
+			hubEpochMu.Lock()
+			if prev, ok := hubEpoch[init.TunnelID]; ok && prev != init.Epoch {
+				hubEpoch[init.TunnelID] = init.Epoch
+				hubEpochMu.Unlock()
+				h.purgeTunnel(init.TunnelID)
+			} else if !ok {
+				hubEpoch[init.TunnelID] = init.Epoch
+				hubEpochMu.Unlock()
+			} else {
+				hubEpochMu.Unlock()
+			}
+		}
 		if init.TunnelID <= -100000 { // تونل تست اتصال: تأیید در قالب فریم وب‌سوکت
 			_ = ws.Send([]byte{1})
 			time.Sleep(3 * time.Second)
@@ -883,8 +993,26 @@ func (h *relayHub) handleWSInit(ws *wsTransport, init relayInit) {
 	}
 }
 
+// listenRetry بایند را تا وقتی پورت آزاد شود تلاش می‌کند (ری‌استارت سرویس‌ها پورت را لحظه‌ای نگه می‌دارد)
+func listenRetry(ctx context.Context, network, addr string) (net.Listener, error) {
+	var lastErr error
+	for i := 0; i < 30; i++ {
+		ln, err := net.Listen(network, addr)
+		if err == nil {
+			return ln, nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(400 * time.Millisecond):
+		}
+	}
+	return nil, lastErr
+}
+
 func (h *relayHub) serveRelay(ctx context.Context, port int) {
-	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
+	ln, err := listenRetry(ctx, "tcp", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
 		fmt.Printf("[relay] listen :%d failed: %v\n", port, err)
 		return
@@ -1068,23 +1196,64 @@ func pipeCounted(dst net.Conn, src io.Reader, counter *atomic.Int64) {
 	}
 }
 
-func runServices(ctx context.Context, cfg agentConfig) {
-	hub := newRelayHub(stats)
-	if cert, err := selfSignedCert(); err == nil {
-		hub.cert, hub.hasCert = cert, true
+// نگه‌دارنده کارگرها: فقط تونلی که واقعاً تغییر کرده ری‌استارت می‌شود
+type tunWorker struct {
+	sig    string
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// workerAlive آیا کارگر هنوز زنده است؟ (اگر مرده باشد باید دوباره ساخته شود)
+func workerAlive(w *tunWorker) bool {
+	select {
+	case <-w.done:
+		return false
+	default:
+		return true
 	}
-	for _, t := range cfg.Listen {
-		if t.Type == "reverse" {
-			hub.tokens[t.ID] = t.Token
+}
+
+var workersMu sync.Mutex
+// کلید شامل پورت/مقصد هم هست: یک تونل چندپورت برای هر پورت کارگر جدا دارد
+var listenWorkers = map[string]*tunWorker{}
+var revWorkers = map[string]*tunWorker{}
+
+func listenKey(id, port int) string { return strconv.Itoa(id) + ":" + strconv.Itoa(port) }
+var probeWorkers = map[int]context.CancelFunc{}
+
+func sigOf(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+// purgeTunnel اتصال‌های آماده و نشست‌های مرده‌ی یک تونل را دور می‌ریزد
+func (h *relayHub) purgeTunnel(id int) {
+	h.mu.Lock()
+	ch := h.pools[id]
+	delete(h.pools, id)
+	sess := h.muxSessions[id]
+	delete(h.muxSessions, id)
+	h.mu.Unlock()
+	if ch != nil {
+		for {
+			select {
+			case pc := <-ch:
+				if pc.conn != nil {
+					_ = pc.conn.Close()
+				}
+			default:
+				goto done
+			}
 		}
+	done:
 	}
-	for _, a := range cfg.AcceptDirect {
-		hub.directTokens[a.ID] = a.Token
-		hub.directTargets[a.ID] = a
+	for _, x := range sess {
+		x.Close()
 	}
-	if cfg.ProbeListen != nil {
-		hub.tokens[probeKey(cfg.ProbeListen.ProbeID)] = cfg.ProbeListen.Token
-	}
+}
+
+func runServices(ctx context.Context, cfg agentConfig, hub *relayHub) {
+	hub.applyConfig(cfg)
 	set := &serviceSet{hub: hub}
 	curSet.Store(set)
 	for _, a := range cfg.AcceptDirect {
@@ -1100,69 +1269,144 @@ func runServices(ctx context.Context, cfg agentConfig) {
 		exitTrans[a.ID][tr].lastOK = time.Now()
 		exitMu.Unlock()
 	}
-	// رله همیشه روی relayPort این نود بالا می‌آید (اگر سرور عمومی باشیم استفاده می‌شود)
-	relayPort := cfg.RelayPort
-	if relayPort == 0 {
-		relayPort = 10000
-	}
-	go hub.serveRelay(ctx, relayPort)
-	go hub.serveUDPLinks(ctx, relayPort)
 
-	var wg sync.WaitGroup
+	liveL, liveR := map[string]bool{}, map[string]bool{}
 	for _, t := range cfg.Listen {
-		t := t
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if t.Type == "reverse" {
-				serveReverseListener(ctx, hub, t)
-			} else {
-				if t.Protocol == "tcp" || t.Protocol == "both" {
-					serveForwardTCP(ctx, set, t)
-				}
-				if t.Protocol == "udp" || t.Protocol == "both" {
-					serveForwardUDP(ctx, t)
-				}
-			}
-		}()
+		liveL[listenKey(t.ID, t.ListenPort)] = true
 	}
 	for _, rc := range cfg.ReverseConnect {
-		rc := rc
-		tr := normTransport(rc.Transport)
-		spawnTCP := func(n int) {
-			for i := 0; i < n; i++ {
-				wg.Add(1)
-				go func() { defer wg.Done(); reverseWorker(ctx, rc) }()
-			}
-		}
-		spawnMux := func(transport string, n int) {
-			for i := 0; i < n; i++ {
-				wg.Add(1)
-				go func() { defer wg.Done(); reverseMuxWorker(ctx, rc, transport) }()
-			}
-		}
-		tcpN, muxN, _ := profilePools(rc.Profile)
-		switch tr {
-		case "tcpmux", "ws", "wss", "quic", "kcp":
-			spawnMux(tr, muxN)
-		case "auto":
-			spawnTCP(maxInt(tcpN-2, 2))
-			spawnMux("tcpmux", 1)
-			spawnMux("ws", 1)
-			spawnMux("wss", 1)
-			spawnMux("quic", 1)
-			spawnMux("kcp", 1)
-		default:
-			spawnTCP(tcpN)
+		liveR[listenKey(rc.ID, rc.TargetPort)] = true
+	}
+	workersMu.Lock()
+	for id, w := range listenWorkers {
+		if !liveL[id] {
+			w.cancel()
+			delete(listenWorkers, id)
 		}
 	}
+	for id, w := range revWorkers {
+		if !liveR[id] {
+			w.cancel()
+			delete(revWorkers, id)
+		}
+	}
+	workersMu.Unlock()
+
+	for _, t := range cfg.Listen {
+		t := t
+		sig := sigOf(t)
+		lk := listenKey(t.ID, t.ListenPort)
+		workersMu.Lock()
+		w, ok := listenWorkers[lk]
+		workersMu.Unlock()
+		if ok && w.sig == sig && workerAlive(w) {
+			continue // بدون تغییر و زنده: لیسنر سر جایش می‌ماند و تونل قطع نمی‌شود
+		}
+		if ok {
+			w.cancel() // فقط خودِ لیسنر عوض می‌شود؛ اتصال‌های آماده‌ی خروجی سر جایشان می‌مانند
+		}
+		cctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		workersMu.Lock()
+		listenWorkers[lk] = &tunWorker{sig: sig, cancel: cancel, done: done}
+		workersMu.Unlock()
+		go func() {
+			defer close(done)
+			defer cancel()
+			if t.Type == "reverse" {
+				serveReverseListener(cctx, hub, t)
+				return
+			}
+			if t.Protocol == "tcp" || t.Protocol == "both" {
+				go serveForwardTCP(cctx, set, t)
+			}
+			if t.Protocol == "udp" || t.Protocol == "both" {
+				go serveForwardUDP(cctx, t)
+			}
+			<-cctx.Done()
+		}()
+	}
+
+	for _, rc := range cfg.ReverseConnect {
+		rc := rc
+		sig := sigOf(rc)
+		rk := listenKey(rc.ID, rc.TargetPort)
+		workersMu.Lock()
+		w, ok := revWorkers[rk]
+		workersMu.Unlock()
+		if ok && w.sig == sig && workerAlive(w) {
+			continue // بدون تغییر و زنده: لینک خروجی دست‌نخورده می‌ماند
+		}
+		if ok {
+			w.cancel()
+			hub.purgeTunnel(rc.ID)
+		}
+		cctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		workersMu.Lock()
+		revWorkers[rk] = &tunWorker{sig: sig, cancel: cancel, done: done}
+		workersMu.Unlock()
+		rc.Epoch = time.Now().UnixNano() // نشانه‌ی این دور؛ ورودی با دیدن آن استخر قدیمی را پاک می‌کند
+		go func() {
+			defer close(done)
+			defer cancel()
+			spawnReverseWorkers(cctx, rc)
+		}()
+	}
+
 	if cfg.ProbeDial != nil {
-		wg.Add(1)
-		go func() { defer wg.Done(); runProbeDial(ctx, cfg.ProbeDial) }()
+		pid := cfg.ProbeDial.ProbeID
+		workersMu.Lock()
+		_, running := probeWorkers[pid]
+		workersMu.Unlock()
+		if !running {
+			pctx, pcancel := context.WithCancel(ctx)
+			workersMu.Lock()
+			probeWorkers[pid] = pcancel
+			workersMu.Unlock()
+			go func() {
+				defer func() {
+					workersMu.Lock()
+					delete(probeWorkers, pid)
+					workersMu.Unlock()
+					pcancel()
+				}()
+				runProbeDial(pctx, cfg.ProbeDial)
+			}()
+		}
+	}
+}
+
+// spawnReverseWorkers کارگرهای لینک خروجی را طبق ترنسپورت و پروفایل می‌سازد
+func spawnReverseWorkers(ctx context.Context, rc revCfg) {
+	spawnTCP := func(n int) {
+		for i := 0; i < n; i++ {
+			go reverseWorker(ctx, rc)
+		}
+	}
+	spawnMux := func(transport string, n int) {
+		for i := 0; i < n; i++ {
+			go reverseMuxWorker(ctx, rc, transport)
+		}
+	}
+	tr := normTransport(rc.Transport)
+	tcpN, muxN, _ := profilePools(rc.Profile)
+	switch tr {
+	case "tcpmux", "ws", "wss", "quic", "kcp":
+		spawnMux(tr, muxN)
+	case "auto":
+		spawnTCP(maxInt(tcpN-2, 2))
+		spawnMux("tcpmux", 1)
+		spawnMux("ws", 1)
+		spawnMux("wss", 1)
+		spawnMux("quic", 1)
+		spawnMux("kcp", 1)
+	default:
+		spawnTCP(tcpN)
 	}
 	<-ctx.Done()
-	wg.Wait()
 }
+
 
 func serveForwardTCP(ctx context.Context, set *serviceSet, t listenCfg) {
 	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", t.ListenPort))
@@ -1239,12 +1483,12 @@ func serveReverseListener(ctx context.Context, hub *relayHub, t listenCfg) {
 		go func(client net.Conn) {
 			tr := normTransport(t.Transport)
 			if tr != "tcp" {
-				if sess := hub.getMuxSession(t.ID, tr); sess != nil {
-					if err := sess.Open(client, t.TargetHost, t.TargetPort, st); err != nil {
-						_ = client.Close()
-					}
+				if hub.tryMux(t.ID, tr, func(sess *muxSession) error {
+					return sess.Open(client, t.TargetHost, t.TargetPort, st)
+				}) {
 					return
 				}
+				_ = client.Close()
 				if tr != "auto" {
 					_ = client.Close()
 					return
@@ -1285,7 +1529,7 @@ func reverseWorker(ctx context.Context, rc revCfg) {
 		}
 		func() {
 			defer conn.Close()
-			reg, _ := json.Marshal(map[string]any{"tunnel_id": rc.ID, "token": rc.Token})
+			reg, _ := json.Marshal(map[string]any{"tunnel_id": rc.ID, "token": rc.Token, "epoch": rc.Epoch})
 			if _, err := conn.Write(append(reg, '\n')); err != nil {
 				return
 			}
@@ -1328,7 +1572,7 @@ func reverseMuxWorker(ctx context.Context, rc revCfg, transport string) {
 		default:
 		}
 		init, _ := json.Marshal(map[string]any{"type": "register", "mode": "mux", "transport": transport,
-			"tunnel_id": rc.ID, "token": rc.Token})
+			"tunnel_id": rc.ID, "token": rc.Token, "epoch": rc.Epoch})
 		ft, err := dialLinkT(addr, transport, init, 12*time.Second)
 		if err != nil {
 			markExitFail(rc.ID, transport, "ورودی "+addr+" پاسخ نداد: "+err.Error())
@@ -1486,6 +1730,13 @@ func runAgent(panelURL, token string, relayPort, pollSec int) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// هاب و لیسنرهای رله برای همیشه زنده می‌مانند؛ فقط کارگرهای تونل با کانفیگ عوض می‌شوند
+	hub := newRelayHub(stats)
+	if cert, err := selfSignedCert(); err == nil {
+		hub.cert, hub.hasCert = cert, true
+	}
+	go hub.serveRelay(ctx, relayPort)
+	go hub.serveUDPLinks(ctx, relayPort)
 	var currentSig string
 	var stopServices context.CancelFunc
 
@@ -1519,7 +1770,7 @@ func runAgent(panelURL, token string, relayPort, pollSec int) error {
 					}
 					sctx, scancel := context.WithCancel(ctx)
 					stopServices = scancel
-					go runServices(sctx, cfg)
+					go runServices(sctx, cfg, hub)
 				}
 			}
 			hb := map[string]any{"hostname": hostname, "ip": localIP(), "version": Version,
