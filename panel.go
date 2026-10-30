@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -108,10 +109,7 @@ func (p *panelServer) nodeOut(n Node) map[string]any {
 	if ts, ok := parseTime(n.LastSeen); ok && time.Since(ts) < 35*time.Second {
 		online = true
 	}
-	host := n.Host
-	if host == "" {
-		host = n.ReportedIP
-	}
+	host := publicHost(n)
 	memPct, diskPct := 0.0, 0.0
 	if n.MemTotalBytes > 0 {
 		memPct = float64(n.MemUsedBytes) / float64(n.MemTotalBytes) * 100
@@ -120,7 +118,7 @@ func (p *panelServer) nodeOut(n Node) map[string]any {
 		diskPct = float64(n.DiskUsedBytes) / float64(n.DiskTotalBytes) * 100
 	}
 	return map[string]any{"id": n.ID, "name": n.Name, "host": host, "reported_ip": n.ReportedIP,
-		"token": n.Token, "description": n.Description, "agent_version": n.AgentVersion,
+		"token": n.Token, "description": n.Description, "agent_version": n.AgentVersion, "observed_ip": n.ObservedIP,
 		"os_info": n.OSInfo, "relay_port": n.RelayPort, "online": online,
 		"last_seen": nilOrStr(n.LastSeen), "created_at": n.CreatedAt,
 		"resources": map[string]any{"cpu_percent": n.CPUPercent, "mem_used": n.MemUsedBytes,
@@ -138,10 +136,21 @@ func nilOrStr(s string) any {
 
 func normTransport(tr string) string {
 	switch tr {
-	case "tcpmux", "ws", "wss", "auto":
+	case "tcpmux", "ws", "wss", "quic", "kcp", "auto":
 		return tr
 	}
 	return "tcp"
+}
+
+// publicHost بهترین آدرس قابل دسترس سرور: دستی ← مشاهده‌شده توسط پنل ← گزارش ایجنت
+func publicHost(n Node) string {
+	if n.Host != "" {
+		return n.Host
+	}
+	if n.ObservedIP != "" {
+		return n.ObservedIP
+	}
+	return n.ReportedIP
 }
 
 // linkFor وضعیت زنده لینک بین سرور ورودی و خروجی را از گزارش ایجنت‌ها می‌سازد
@@ -332,6 +341,9 @@ func (p *panelServer) authNode(w http.ResponseWriter, r *http.Request) (int, boo
 	defer p.st.mu.Unlock()
 	for i, n := range p.st.d.Nodes {
 		if n.Token == tok && tok != "" {
+			if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && ip != "" {
+				p.st.d.Nodes[i].ObservedIP = ip
+			}
 			p.st.d.Nodes[i].LastSeen = nowStr()
 			_ = p.st.saveLocked()
 			return n.ID, true
@@ -1147,10 +1159,7 @@ func runPanel(host string, port int, dataPath string) error {
 						"profile": normProfile(t.Profile)}
 					if t.Type == "forward" && t.DestNodeID > 0 {
 						if dn, ok := p.findNode(t.DestNodeID); ok {
-							host := dn.Host
-							if host == "" {
-								host = dn.ReportedIP
-							}
+							host := publicHost(dn)
 							item["dest_relay_host"] = host
 							item["dest_relay_port"] = dn.RelayPort
 						}
@@ -1165,10 +1174,7 @@ func runPanel(host string, port int, dataPath string) error {
 			}
 			if t.Type == "reverse" && t.DestNodeID == id {
 				if src, ok := p.findNode(t.SourceNodeID); ok {
-					host := src.Host
-					if host == "" {
-						host = src.ReportedIP
-					}
+					host := publicHost(src)
 					for _, pm := range tunnelPorts(t) {
 						rev = append(rev, map[string]any{"id": t.ID, "token": t.Token,
 							"relay_host": host, "relay_port": src.RelayPort, "transport": normTransport(t.Transport),
@@ -1186,10 +1192,7 @@ func runPanel(host string, port int, dataPath string) error {
 			}
 			if id == task.DstID {
 				if src, ok := p.findNode(task.SrcID); ok {
-					host := src.Host
-					if host == "" {
-						host = src.ReportedIP
-					}
+					host := publicHost(src)
 					resp["probe_dial"] = map[string]any{"probe_id": task.ID, "token": task.Token,
 						"relay_host": host, "relay_port": src.RelayPort}
 				}

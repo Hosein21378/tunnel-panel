@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const Version = "3.0.0"
+const Version = "3.1.0"
 
 func usage() {
 	fmt.Println(`Tunnel Panel v` + Version + ` - single binary, zero dependencies

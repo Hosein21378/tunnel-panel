@@ -18,7 +18,43 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	quic "github.com/quic-go/quic-go"
+	kcp "github.com/xtaci/kcp-go/v5"
 )
+
+var linkTransports = []string{"tcp", "tcpmux", "ws", "wss", "quic", "kcp"}
+
+// quicStreamConn استریم QUIC را به net.Conn تبدیل می‌کند
+type quicStreamConn struct {
+	st   *quic.Stream
+	conn *quic.Conn
+}
+
+func (c *quicStreamConn) Read(b []byte) (int, error)         { return c.st.Read(b) }
+func (c *quicStreamConn) Write(b []byte) (int, error)        { return c.st.Write(b) }
+func (c *quicStreamConn) Close() error {
+	_ = c.st.Close()
+	if c.conn != nil {
+		_ = c.conn.CloseWithError(0, "closed")
+	}
+	return nil
+}
+func (c *quicStreamConn) LocalAddr() net.Addr                { return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)} }
+func (c *quicStreamConn) RemoteAddr() net.Addr               { return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)} }
+func (c *quicStreamConn) SetDeadline(t time.Time) error      { return c.st.SetDeadline(t) }
+func (c *quicStreamConn) SetReadDeadline(t time.Time) error  { return c.st.SetReadDeadline(t) }
+func (c *quicStreamConn) SetWriteDeadline(t time.Time) error { return c.st.SetWriteDeadline(t) }
+
+// udpLinkAddr آدرس UDP ترنسپورت (پورت رله + آفست) را می‌سازد: QUIC=+100 و KCP=+200
+func udpLinkAddr(addr string, delta int) string {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	port, _ := strconv.Atoi(portStr)
+	return net.JoinHostPort(host, strconv.Itoa(port+delta))
+}
 
 // ---------- آمار ترافیک ----------
 type agentStats struct {
@@ -364,11 +400,14 @@ func runProbeDial(ctx context.Context, pc *probeCfg) {
 		case *rawTransport:
 			_ = t.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 			buf := make([]byte, 1)
+			readStart := time.Now()
 			_, rerr := t.reader.Read(buf)
 			if rerr == nil {
 				alive = false
 			} else if ne, ok := rerr.(net.Error); ok && ne.Timeout() {
 				alive = true
+			} else if time.Since(readStart) >= 400*time.Millisecond {
+				alive = true // مهلت تمام شد یعنی اتصال باز مانده (بعضی ترنسپورت‌ها خطای timeout استاندارد نمی‌دهند)
 			} else {
 				alive = false
 			}
@@ -394,7 +433,7 @@ func runProbeDial(ctx context.Context, pc *probeCfg) {
 	// چند دور تلاش: ممکن است ایجنت ورودی هنوز توکن تست را نگرفته باشد
 	best := map[string]map[string]any{}
 	for round := 0; round < 8; round++ {
-		for _, tr := range []string{"tcp", "tcpmux", "ws", "wss"} {
+		for _, tr := range linkTransports {
 			if prev, ok := best[tr]; ok && prev["ok"] == true {
 				continue
 			}
@@ -406,7 +445,7 @@ func runProbeDial(ctx context.Context, pc *probeCfg) {
 			best[tr] = attempt(tr)
 		}
 		allOK := true
-		for _, tr := range []string{"tcp", "tcpmux", "ws", "wss"} {
+		for _, tr := range linkTransports {
 			if best[tr]["ok"] != true {
 				allOK = false
 			}
@@ -421,7 +460,7 @@ func runProbeDial(ctx context.Context, pc *probeCfg) {
 		}
 	}
 	results := []map[string]any{}
-	for _, tr := range []string{"tcp", "tcpmux", "ws", "wss"} {
+	for _, tr := range linkTransports {
 		results = append(results, best[tr])
 	}
 	probeMu.Lock()
@@ -561,6 +600,104 @@ func (h *relayHub) handleAgent(conn net.Conn) {
 		return
 	}
 	h.handleRawInit(bc, reader, init)
+}
+
+// handleStreamConn اتصال‌های استریمی UDP (QUIC/KCP) را مثل اتصال خام TCP پردازش می‌کند
+func (h *relayHub) handleStreamConn(conn net.Conn) {
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	var init relayInit
+	if json.Unmarshal([]byte(line), &init) != nil {
+		_ = conn.Close()
+		return
+	}
+	h.handleRawInit(&bufferedConn{Conn: conn, r: reader}, reader, init)
+}
+
+// serveUDPLinks لیسنرهای QUIC (پورت+۱۰۰) و KCP (پورت+۲۰۰) سمت ورودی؛
+// اگر پورت لحظه‌ای دست نمونه قبلی بود، چند ثانیه تلاش مجدد می‌کند
+func (h *relayHub) serveUDPLinks(ctx context.Context, relayPort int) {
+	if h.hasCert {
+		go func() {
+			var ql *quic.Listener
+			for i := 0; i < 20 && ql == nil; i++ {
+				tlsConf := &tls.Config{Certificates: []tls.Certificate{h.cert}, NextProtos: []string{"tpanel-link"}}
+				l, err := quic.ListenAddr(fmt.Sprintf("0.0.0.0:%d", relayPort+100), tlsConf,
+					&quic.Config{MaxIdleTimeout: 40 * time.Second, KeepAlivePeriod: 10 * time.Second})
+				if err == nil {
+					ql = l
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(700 * time.Millisecond):
+				}
+			}
+			if ql == nil {
+				fmt.Printf("[relay] QUIC listen failed on :%d\n", relayPort+100)
+				return
+			}
+			go func() { <-ctx.Done(); _ = ql.Close() }()
+			fmt.Printf("[relay] QUIC link listening udp :%d\n", relayPort+100)
+			for {
+				qc, err := ql.Accept(ctx)
+				if err != nil {
+					return
+				}
+				go func(qc *quic.Conn) {
+					st, err := qc.AcceptStream(ctx)
+					if err != nil {
+						_ = qc.CloseWithError(0, "no stream")
+						return
+					}
+					h.handleStreamConn(&quicStreamConn{st: st, conn: qc})
+				}(qc)
+			}
+		}()
+	}
+	go func() {
+		var kl *kcp.Listener
+		for i := 0; i < 20 && kl == nil; i++ {
+			l, err := kcp.ListenWithOptions(fmt.Sprintf("0.0.0.0:%d", relayPort+200), nil, 10, 3)
+			if err == nil {
+				kl = l
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(700 * time.Millisecond):
+			}
+		}
+		if kl == nil {
+			fmt.Printf("[relay] KCP listen failed on :%d\n", relayPort+200)
+			return
+		}
+		go func() { <-ctx.Done(); _ = kl.Close() }()
+		fmt.Printf("[relay] KCP link listening udp :%d\n", relayPort+200)
+		for {
+			sess, err := kl.AcceptKCP()
+			if err != nil {
+				return
+			}
+			tuneKCP(sess)
+			go h.handleStreamConn(sess)
+		}
+	}()
+}
+
+func tuneKCP(s *kcp.UDPSession) {
+	s.SetStreamMode(true)
+	s.SetWriteDelay(false)
+	s.SetNoDelay(1, 10, 2, 1)
+	s.SetWindowSize(1024, 1024)
+	s.SetMtu(1350)
 }
 
 func (h *relayHub) authToken(table map[int]string, init relayInit) bool {
@@ -781,6 +918,38 @@ func dialLink(addr, transport string, init []byte) (frameTransport, error) {
 			return nil, err
 		}
 		return ws, nil
+	case "quic":
+		host, _, _ := net.SplitHostPort(addr)
+		dctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		qc, err := quic.DialAddr(dctx, udpLinkAddr(addr, 100),
+			&tls.Config{InsecureSkipVerify: true, NextProtos: []string{"tpanel-link"}, ServerName: host}, // #nosec: توکن داخل لینک احراز می‌کند
+			&quic.Config{MaxIdleTimeout: 40 * time.Second, KeepAlivePeriod: 10 * time.Second})
+		if err != nil {
+			return nil, err
+		}
+		st, err := qc.OpenStreamSync(dctx)
+		if err != nil {
+			_ = qc.CloseWithError(0, "open stream failed")
+			return nil, err
+		}
+		sc := &quicStreamConn{st: st, conn: qc}
+		if _, err := sc.Write(append(init, '\n')); err != nil {
+			_ = sc.Close()
+			return nil, err
+		}
+		return &rawTransport{conn: sc, reader: sc}, nil
+	case "kcp":
+		sess, err := kcp.DialWithOptions(udpLinkAddr(addr, 200), nil, 10, 3)
+		if err != nil {
+			return nil, err
+		}
+		tuneKCP(sess)
+		if _, err := sess.Write(append(init, '\n')); err != nil {
+			_ = sess.Close()
+			return nil, err
+		}
+		return &rawTransport{conn: sess, reader: sess}, nil
 	default: // tcpmux و tcp خام
 		conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 		if err != nil {
@@ -850,6 +1019,7 @@ func runServices(ctx context.Context, cfg agentConfig) {
 		relayPort = 10000
 	}
 	go hub.serveRelay(ctx, relayPort)
+	go hub.serveUDPLinks(ctx, relayPort)
 
 	var wg sync.WaitGroup
 	for _, t := range cfg.Listen {
@@ -886,13 +1056,15 @@ func runServices(ctx context.Context, cfg agentConfig) {
 		}
 		tcpN, muxN, _ := profilePools(rc.Profile)
 		switch tr {
-		case "tcpmux", "ws", "wss":
+		case "tcpmux", "ws", "wss", "quic", "kcp":
 			spawnMux(tr, muxN)
 		case "auto":
 			spawnTCP(maxInt(tcpN-2, 2))
 			spawnMux("tcpmux", 1)
 			spawnMux("ws", 1)
 			spawnMux("wss", 1)
+			spawnMux("quic", 1)
+			spawnMux("kcp", 1)
 		default:
 			spawnTCP(tcpN)
 		}

@@ -31,6 +31,7 @@ type Node struct {
 	Name         string `json:"name"`
 	Host         string `json:"host"`
 	ReportedIP   string `json:"reported_ip"`
+	ObservedIP   string `json:"observed_ip"`
 	Token        string `json:"token"`
 	Description  string `json:"description"`
 	AgentVersion string `json:"agent_version"`
