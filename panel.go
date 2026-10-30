@@ -40,6 +40,7 @@ type probeTask struct {
 	DstID   int
 	Token string
 	Created time.Time
+	Final   bool
 	Results []probeResult
 }
 
@@ -1114,7 +1115,11 @@ func runPanel(host string, port int, dataPath string) error {
 			errJSON(w, 404, "تست یافت نشد")
 			return
 		}
-		done := len(task.Results) > 0
+		age := time.Since(task.Created)
+		done := task.Final || age > 75*time.Second
+		if !done && len(task.Results) > 0 && age > 45*time.Second {
+			done = true
+		}
 		suggested := ""
 		if done {
 			bestRtt := int64(0)
@@ -1134,7 +1139,8 @@ func runPanel(host string, port int, dataPath string) error {
 			}
 		}
 		writeJSON(w, 200, map[string]any{"done": done, "results": task.Results,
-			"suggested": suggested, "age_seconds": int(time.Since(task.Created).Seconds())})
+			"suggested": suggested, "partial": !task.Final,
+			"age_seconds": int(time.Since(task.Created).Seconds())})
 	})
 	mux.HandleFunc("/api/agent/config", func(w http.ResponseWriter, r *http.Request) {
 		id, ok := agentTouch(w, r)
@@ -1214,6 +1220,7 @@ func runPanel(host string, port int, dataPath string) error {
 			ProbeResults   []struct {
 				ProbeID int           `json:"probe_id"`
 				Results []probeResult `json:"results"`
+				Final   bool          `json:"final"`
 			} `json:"probe_results"`
 			CPUPercent     float64 `json:"cpu_percent"`
 			MemUsedBytes   int64   `json:"mem_used_bytes"`
@@ -1244,6 +1251,7 @@ func runPanel(host string, port int, dataPath string) error {
 						if task := p.getProbe(pr.ProbeID); task != nil && task.DstID == id {
 							p.probeMu.Lock()
 							task.Results = pr.Results
+							task.Final = task.Final || pr.Final
 							p.probeMu.Unlock()
 						}
 					}

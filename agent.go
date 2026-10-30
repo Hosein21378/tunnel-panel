@@ -93,12 +93,31 @@ type exitTransState struct {
 	rttMs     int64
 	sess      *muxSession
 	listening bool
+	lastErr   string
 }
 
 var exitMu sync.Mutex
 var exitTrans = map[int]map[string]*exitTransState{}
 var listenersUp sync.Map // tunnelID -> bool
 var curSet atomic.Pointer[serviceSet]
+
+// markExitFail آخرین خطای اتصال خروجی را برای نمایش در پنل نگه می‌دارد
+func markExitFail(tid int, tr, msg string) {
+	exitMu.Lock()
+	defer exitMu.Unlock()
+	if exitTrans[tid] == nil {
+		exitTrans[tid] = map[string]*exitTransState{}
+	}
+	st := exitTrans[tid][tr]
+	if st == nil {
+		st = &exitTransState{}
+		exitTrans[tid][tr] = st
+	}
+	if len(msg) > 160 {
+		msg = msg[:160]
+	}
+	st.lastErr = msg
+}
 
 func markExitTrans(tid int, tr string, sess *muxSession, rttMs int64) {
 	exitMu.Lock()
@@ -112,6 +131,7 @@ func markExitTrans(tid int, tr string, sess *muxSession, rttMs int64) {
 		exitTrans[tid][tr] = st
 	}
 	st.lastOK = time.Now()
+	st.lastErr = ""
 	if sess != nil {
 		st.sess = sess
 	}
@@ -189,7 +209,11 @@ func buildLinks(cfg agentConfig) []map[string]any {
 			if st.sess != nil {
 				rtt = st.sess.rttMs.Load()
 			}
-			trs = append(trs, map[string]any{"name": name, "up": up, "rtt_ms": rtt})
+			row := map[string]any{"name": name, "up": up, "rtt_ms": rtt}
+			if !up && st.lastErr != "" {
+				row["last_err"] = st.lastErr
+			}
+			trs = append(trs, row)
 		}
 		exitMu.Unlock()
 		rep["transports"] = trs
@@ -379,6 +403,7 @@ func profilePools(profile string) (tcpWorkers, muxSessions int, ping time.Durati
 
 // نتایج تست اتصال که باید با هارت‌بیت به پنل برود
 var probeMu sync.Mutex
+var pendingProbeFinal = map[int]bool{}
 var pendingProbes = map[int][]map[string]any{}
 
 func runProbeDial(ctx context.Context, pc *probeCfg) {
@@ -388,84 +413,110 @@ func runProbeDial(ctx context.Context, pc *probeCfg) {
 		start := time.Now()
 		init, _ := json.Marshal(map[string]any{"type": "register", "mode": map[bool]string{true: "mux", false: ""}[tr != "tcp"],
 			"transport": tr, "tunnel_id": probeKey(pc.ProbeID), "token": pc.Token})
-		ft, err := dialLink(addr, tr, init)
+		ft, err := dialLinkT(addr, tr, init, 6*time.Second)
 		if err != nil {
 			res["error"] = err.Error()
 			return res
 		}
 		dialMs := time.Since(start).Milliseconds()
-		// زنده‌بودن لینک: اگر طرف مقابل سریع بست یعنی رد شده
-		alive := true
+		// وصل شدن واقعی یعنی ورودی تأیید را پس فرستاده باشد (مسیر دوطرفه)
+		alive := false
 		switch t := ft.(type) {
 		case *rawTransport:
-			_ = t.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-			buf := make([]byte, 1)
-			readStart := time.Now()
-			_, rerr := t.reader.Read(buf)
-			if rerr == nil {
-				alive = false
-			} else if ne, ok := rerr.(net.Error); ok && ne.Timeout() {
-				alive = true
-			} else if time.Since(readStart) >= 400*time.Millisecond {
-				alive = true // مهلت تمام شد یعنی اتصال باز مانده (بعضی ترنسپورت‌ها خطای timeout استاندارد نمی‌دهند)
-			} else {
-				alive = false
-			}
+			_ = t.conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+			one := make([]byte, 1)
+			n, rerr := t.reader.Read(one)
 			_ = t.conn.SetReadDeadline(time.Time{})
+			if n > 0 && rerr == nil {
+				alive = true
+			} else if rerr != nil {
+				res["error"] = "تأییدی از ورودی نرسید: " + rerr.Error()
+			}
 		case *wsTransport:
 			ch := make(chan error, 1)
 			go func() { _, e := t.Recv(); ch <- e }()
 			select {
-			case <-ch:
-				alive = false
-			case <-time.After(500 * time.Millisecond):
-				alive = true
+			case e := <-ch:
+				if e == nil {
+					alive = true
+				} else {
+					res["error"] = "تأییدی از ورودی نرسید: " + e.Error()
+				}
+			case <-time.After(4 * time.Second):
+				res["error"] = "مهلت تأیید تمام شد (پورت باز نیست یا فیلتر شده)"
 			}
-		}
-		res["rtt_ms"] = dialMs
-		res["ok"] = alive
-		if !alive {
-			res["error"] = "اتصال از سمت ورودی بسته شد"
 		}
 		_ = ft.Close()
+		res["rtt_ms"] = dialMs
+		res["ok"] = alive
+		if !alive && res["error"] == "" {
+			res["error"] = "تأییدی از ورودی نرسید"
+		}
 		return res
 	}
+
 	// چند دور تلاش: ممکن است ایجنت ورودی هنوز توکن تست را نگرفته باشد
 	best := map[string]map[string]any{}
-	for round := 0; round < 8; round++ {
+	var bmu sync.Mutex
+	publish := func(final bool) {
+		bmu.Lock()
+		out := []map[string]any{}
 		for _, tr := range linkTransports {
-			if prev, ok := best[tr]; ok && prev["ok"] == true {
+			if r, ok := best[tr]; ok {
+				out = append(out, r)
+			}
+		}
+		bmu.Unlock()
+		if len(out) == 0 {
+			return
+		}
+		payload := []map[string]any{{"final": final, "results": out}}
+		probeMu.Lock()
+		pendingProbes[pc.ProbeID] = out
+		pendingProbeFinal[pc.ProbeID] = final
+		probeMu.Unlock()
+		_ = payload
+	}
+	for round := 0; round < 6; round++ {
+		var rw sync.WaitGroup
+		for _, tr := range linkTransports {
+			bmu.Lock()
+			_, done := best[tr]
+			prevOK := done && best[tr]["ok"] == true
+			bmu.Unlock()
+			if prevOK {
 				continue
 			}
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			best[tr] = attempt(tr)
+			rw.Add(1)
+			go func(tr string) {
+				defer rw.Done()
+				r := attempt(tr)
+				bmu.Lock()
+				if prev, ok := best[tr]; !ok || prev["ok"] != true {
+					best[tr] = r
+				}
+				bmu.Unlock()
+			}(tr)
 		}
+		rw.Wait()
 		allOK := true
+		bmu.Lock()
 		for _, tr := range linkTransports {
-			if best[tr]["ok"] != true {
+			if v, ok := best[tr]; !ok || v["ok"] != true {
 				allOK = false
 			}
 		}
+		bmu.Unlock()
+		publish(allOK || round == 5)
 		if allOK {
 			break
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(5 * time.Second):
+		case <-time.After(3 * time.Second):
 		}
 	}
-	results := []map[string]any{}
-	for _, tr := range linkTransports {
-		results = append(results, best[tr])
-	}
-	probeMu.Lock()
-	pendingProbes[pc.ProbeID] = results
-	probeMu.Unlock()
 	fmt.Printf("[probe %d] link test done\n", pc.ProbeID)
 }
 
@@ -716,6 +767,12 @@ func (h *relayHub) handleRawInit(bc *bufferedConn, reader *bufio.Reader, init re
 			return
 		}
 		_ = bc.SetReadDeadline(time.Time{})
+		if init.TunnelID <= -100000 { // تونل تست اتصال: فقط یک تأیید می‌فرستیم
+			_, _ = bc.Write([]byte{1})
+			time.Sleep(3 * time.Second)
+			_ = bc.Close()
+			return
+		}
 		if init.Mode == "mux" {
 			sess := newMuxSession(&rawTransport{conn: bc, reader: reader}, normTransport(init.Transport), init.TunnelID, true, targetDial)
 			h.addMuxSession(sess)
@@ -767,6 +824,12 @@ func (h *relayHub) handleWSInit(ws *wsTransport, init relayInit) {
 			return
 		}
 		_ = ws.conn.SetReadDeadline(time.Time{})
+		if init.TunnelID <= -100000 { // تونل تست اتصال: تأیید در قالب فریم وب‌سوکت
+			_ = ws.Send([]byte{1})
+			time.Sleep(3 * time.Second)
+			_ = ws.Close()
+			return
+		}
 		sess := newMuxSession(ws, normTransport(init.Transport), init.TunnelID, true, targetDial)
 		h.addMuxSession(sess)
 		sess.Run()
@@ -920,7 +983,7 @@ func dialLink(addr, transport string, init []byte) (frameTransport, error) {
 		return ws, nil
 	case "quic":
 		host, _, _ := net.SplitHostPort(addr)
-		dctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		dctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		qc, err := quic.DialAddr(dctx, udpLinkAddr(addr, 100),
 			&tls.Config{InsecureSkipVerify: true, NextProtos: []string{"tpanel-link"}, ServerName: host}, // #nosec: توکن داخل لینک احراز می‌کند
@@ -960,6 +1023,30 @@ func dialLink(addr, transport string, init []byte) (frameTransport, error) {
 			return nil, err
 		}
 		return &rawTransport{conn: conn, reader: conn}, nil
+	}
+}
+
+// dialLinkT مثل dialLink ولی با مهلت کلّی؛ پورت‌های بسته/فیلترشده دیگر پروب را قفل نمی‌کنند
+func dialLinkT(addr, transport string, init []byte, timeout time.Duration) (frameTransport, error) {
+	type res struct {
+		ft  frameTransport
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		ft, err := dialLink(addr, transport, init)
+		ch <- res{ft, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.ft, r.err
+	case <-time.After(timeout):
+		go func() {
+			if r, ok := <-ch; ok && r.ft != nil {
+				_ = r.ft.Close()
+			}
+		}()
+		return nil, fmt.Errorf("مهلت %v تمام شد (پورت فیلتر شده یا پاسخی نیامد)", timeout)
 	}
 }
 
@@ -1192,6 +1279,7 @@ func reverseWorker(ctx context.Context, rc revCfg) {
 		dialStart := time.Now()
 		conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 		if err != nil {
+			markExitFail(rc.ID, "tcp", "ورودی "+addr+" در دسترس نیست: "+err.Error())
 			sleepCtx(ctx, 5*time.Second)
 			continue
 		}
@@ -1241,8 +1329,9 @@ func reverseMuxWorker(ctx context.Context, rc revCfg, transport string) {
 		}
 		init, _ := json.Marshal(map[string]any{"type": "register", "mode": "mux", "transport": transport,
 			"tunnel_id": rc.ID, "token": rc.Token})
-		ft, err := dialLink(addr, transport, init)
+		ft, err := dialLinkT(addr, transport, init, 12*time.Second)
 		if err != nil {
+			markExitFail(rc.ID, transport, "ورودی "+addr+" پاسخ نداد: "+err.Error())
 			sleepCtx(ctx, 4*time.Second)
 			continue
 		}
@@ -1440,7 +1529,7 @@ func runAgent(panelURL, token string, relayPort, pollSec int) error {
 			if len(pendingProbes) > 0 {
 				prs := []map[string]any{}
 				for pid, res := range pendingProbes {
-					prs = append(prs, map[string]any{"probe_id": pid, "results": res})
+					prs = append(prs, map[string]any{"probe_id": pid, "results": res, "final": pendingProbeFinal[pid]})
 				}
 				hb["probe_results"] = prs
 			}

@@ -69,6 +69,7 @@ type TransReport struct {
 	RTTms    int64  `json:"rtt_ms"`
 	Streams  int    `json:"streams"`
 	Pooled   int    `json:"pooled"`
+	LastErr  string `json:"last_err"`
 	Listening bool  `json:"listening"`
 	OnDemand bool   `json:"ondemand"`
 }

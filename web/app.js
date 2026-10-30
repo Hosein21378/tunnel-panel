@@ -1,4 +1,12 @@
 const $ = s => document.querySelector(s);
+window.addEventListener('error', e => {
+  try{ toast('خطای صفحه: ' + (e.message||'نامشخص') + ' — جزئیات در کنسول مرورگر', true); }catch(_){}
+  console.error('[tp] global error', e.error || e.message);
+});
+window.addEventListener('unhandledrejection', e => {
+  try{ toast('خطای درخواست: ' + ((e.reason && e.reason.message) || 'نامشخص'), true); }catch(_){}
+  console.error('[tp] unhandled rejection', e.reason);
+});
 document.documentElement.dataset.theme = localStorage.getItem('tp_theme') || 'night';
 function toggleTheme(){
   const next = document.documentElement.dataset.theme === 'dawn' ? 'night' : 'dawn';
@@ -250,37 +258,58 @@ function linkBadge(t){
     default: return `<span class="lbadge warn">🟡 در انتظار اتصال خروجی…</span>`;
   }
 }
+let linkTestBusy = false;
 async function runLinkTest(){
+  if(linkTestBusy) return;
   const srcId = wiz.srcId, dstId = wiz.dstId;
   const box = $('#linkTestResult');
-  if(!srcId || !dstId){ box.innerHTML = '<p class="hint">اول سرور ورودی و خروجی را انتخاب کن.</p>'; return; }
-  if(srcId === dstId){ box.innerHTML = '<p class="hint">سرور ورودی و خروجی نمی‌توانند یکی باشند.</p>'; return; }
-  const srcN = nodesCache.find(n=>n.id===srcId), dstN = nodesCache.find(n=>n.id===dstId);
-  if((srcN && !srcN.online) || (dstN && !dstN.online)){ box.innerHTML = '<p class="hint">⚠️ یکی از دو سرور الان آفلاین است؛ ایجنتش را بررسی کن بعد تست بگیر.</p>'; return; }
-  $('#linkTestBtn').disabled = true;
-  box.innerHTML = '<p class="muted">⏳ در حال تست... ایجنت خروجی با هر ۴ روش به سرور ورودی وصل می‌شود (ممکن است تا ۳۰ ثانیه طول بکشد).</p>';
+  const btn = $('#linkTestBtn');
   try{
-    const { probe_id } = await api('POST','/api/linktest', { source_node_id: srcId, dest_node_id: dstId });
-    const started = Date.now();
-    while(Date.now() - started < 90000){
-      await new Promise(r=>setTimeout(r, 2500));
-      const st = await api('GET','/api/linktest/' + probe_id);
-      if(st.done){
-        const rows = (st.results||[]).map(r=>`<tr${st.suggested===r.transport?' class="suggested"':''}>
-          <td>${TRANS_FA[r.transport]||r.transport}${st.suggested===r.transport?' ⭐':''}</td>
-          <td>${r.ok?'🟢 وصل شد':'🔴 نشد'}</td>
-          <td>${r.ok? Number(r.rtt_ms||0).toLocaleString('fa-IR')+'ms' : '<span class="muted">'+esc(r.error||'')+'</span>'}</td></tr>`).join('');
-        box.innerHTML = `<table class="probe-table"><thead><tr><th>ترنسپورت</th><th>نتیجه</th><th>تأخیر</th></tr></thead><tbody>${rows}</tbody></table>
-          ${st.suggested? `<p class="hint">💡 پیشنهاد: <b>${TRANS_FA[st.suggested]||st.suggested}</b> — بهترین مسیر بین این دو سرور همین است.
-          <button type="button" class="btn ghost" onclick="applyTransport('${st.suggested}')">استفاده از ${TRANS_FA[st.suggested]||st.suggested}</button></p>`
-          : '<p class="hint">⚠️ هیچ روشی وصل نشد؛ احتمالاً پورت رله سرور ورودی (پیش‌فرض ۱۰۰۰۰) از سرور خروجی بسته است یا ایجنت خروجی قدیمی است.</p>'}`;
-        $('#linkTestBtn').disabled = false;
-        return;
-      }
+    if(!box || !btn) throw new Error('المان‌های تست در صفحه پیدا نشد؛ صفحه را رفرش کن.');
+    if(!srcId || !dstId){ box.innerHTML = '<p class="hint">اول سرور ورودی و خروجی را انتخاب کن.</p>'; return; }
+    if(srcId === dstId){ box.innerHTML = '<p class="hint">سرور ورودی و خروجی نمی‌توانند یکی باشند.</p>'; return; }
+    const srcN = nodesCache.find(n=>n.id===srcId), dstN = nodesCache.find(n=>n.id===dstId);
+    if((srcN && !srcN.online) || (dstN && !dstN.online)){ box.innerHTML = '<p class="hint">⚠️ یکی از دو سرور الان آفلاین است؛ ایجنتش را بررسی کن بعد تست بگیر.</p>'; return; }
+    linkTestBusy = true; btn.disabled = true;
+    box.innerHTML = '<p class="muted">⏳ در حال تست... ایجنت خروجی با هر ۶ روش به سرور ورودی وصل می‌شود (حدود ۳۰ ثانیه).</p>';
+    let probeId = null;
+    try{
+      const r = await api('POST','/api/linktest', { source_node_id: srcId, dest_node_id: dstId });
+      probeId = r.probe_id;
+    }catch(e){
+      box.innerHTML = '<p class="hint">❌ تست شروع نشد: '+esc(e.message)+'</p>';
+      linkTestBusy = false; btn.disabled = false; return;
     }
-    box.innerHTML = '<p class="hint">⏱️ تست کامل نشد؛ مطمئن شو هر دو ایجنت آنلاین و به‌روزند، بعد دوباره تست بگیر.</p>';
-  }catch(e){ box.innerHTML = '<p class="hint">خطا: '+esc(e.message)+'</p>'; }
-  $('#linkTestBtn').disabled = false;
+    const render = (st)=>{
+      const rows = (st.results||[]).map(r=>`<tr${st.suggested===r.transport?' class="suggested"':''}>
+        <td>${TRANS_FA[r.transport]||r.transport}${st.suggested===r.transport?' ⭐':''}</td>
+        <td>${r.ok?'🟢 وصل شد':'🔴 نشد'}</td>
+        <td>${r.ok? Number(r.rtt_ms||0).toLocaleString('fa-IR')+'ms' : '<span class="muted">'+esc(r.error||'—')+'</span>'}</td></tr>`).join('');
+      box.innerHTML = `<table class="probe-table"><thead><tr><th>ترنسپورت</th><th>نتیجه</th><th>تأخیر / علت</th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="muted">هنوز پاسخی نرسیده...</td></tr>'}</tbody></table>
+        ${st.done ? (st.suggested
+          ? `<p class="hint">💡 پیشنهاد: <b>${TRANS_FA[st.suggested]||st.suggested}</b> — بهترین مسیر بین این دو سرور همین است.
+             <button type="button" class="btn ghost" onclick="applyTransport('${st.suggested}')">استفاده از ${TRANS_FA[st.suggested]||st.suggested}</button></p>`
+          : '<p class="hint">⚠️ هیچ روشی وصل نشد. علت را از ستون «علت» بخوان: اگر همه «مهلت تمام شد» یا «پاسخ نداد» است، پورت رله سرور ورودی از سرور خروجی بسته است (TCP پیش‌فرض ۱۰۰۰۰ و UDP ۱۰۱۰۰/۱۰۲۰۰).</p>')
+        : '<p class="muted">⏳ هنوز در حال تست بقیه روش‌ها...</p>'}`;
+    };
+    const started = Date.now();
+    let last = {done:false, results:[]};
+    while(Date.now() - started < 100000){
+      await new Promise(r=>setTimeout(r, 1800));
+      let st;
+      try{ st = await api('GET','/api/linktest/' + probeId); }
+      catch(e){ box.innerHTML = '<p class="hint">❌ خطا در دریافت نتیجه: '+esc(e.message)+'</p>'; break; }
+      last = st;
+      render(st);
+      if(st.done) break;
+    }
+    if(!last.done) render({done:true, results:last.results||[], suggested:''});
+  }catch(e){
+    if(box) box.innerHTML = '<p class="hint">❌ خطای غیرمنتظره: '+esc(e && e.message ? e.message : String(e))+'</p>';
+    console.error('runLinkTest', e);
+  }
+  linkTestBusy = false;
+  const b2 = $('#linkTestBtn'); if(b2) b2.disabled = false;
 }
 function applyTransport(tr){
   wizSetTrans(tr);
@@ -304,7 +333,7 @@ async function openProbe(id){
       if(!trs.length) return `<tr><td>${label}</td><td colspan="3" class="muted">ترنسپورتی گزارش نشده</td></tr>`;
       return trs.map(tr=>`<tr><td>${label}</td><td>${TRANS_FA[tr.name]||tr.name}</td>
         <td>${tr.up? '🟢 وصل' : (tr.listening? '🔵 گوش‌به‌زنگ' : (tr.ondemand? '⚪ عنداللزوم' : '🔴 قطع'))}</td>
-        <td>${tr.rtt_ms? Number(tr.rtt_ms).toLocaleString('fa-IR')+'ms' : (tr.pooled? tr.pooled.toLocaleString('fa-IR')+' کانکشن آماده' : (tr.streams? tr.streams.toLocaleString('fa-IR')+' استریم' : '—'))}</td></tr>`).join('');
+        <td>${tr.up? (tr.rtt_ms? Number(tr.rtt_ms).toLocaleString('fa-IR')+'ms' : (tr.pooled? tr.pooled.toLocaleString('fa-IR')+' کانکشن آماده' : (tr.streams? tr.streams.toLocaleString('fa-IR')+' استریم' : '🟢'))) : (tr.last_err? '<span class="muted">'+esc(tr.last_err)+'</span>' : '—')}</td></tr>`).join('');
     };
     rows.push(sideRows(L.entry, 'ورودی · ' + (t? esc(t.source_node_name||'') : '')));
     if(t && t.dest_node_id) rows.push(sideRows(L.exit, 'خروجی · ' + esc(t.dest_node_name||'')));
